@@ -1,0 +1,8 @@
+gym-retro
+
+gym
+numpy
+opencv-python
+
+pydantic
+requests

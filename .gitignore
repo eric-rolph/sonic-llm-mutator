@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+venv38/
+.env
+
+# Project specific
+artifacts/
+policies/
+*.png
+*.mp4
+*.bin
+*.bk2
