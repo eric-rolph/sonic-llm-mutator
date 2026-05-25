@@ -21,7 +21,7 @@ class EvolutionHistory:
         with open(self.log_path, 'w') as f:
             json.dump(self.history, f, indent=4)
 
-    def log_generation(self, generation, policy_file, fitness, failure_reason, screenshot_path, llm_reasoning):
+    def log_generation(self, generation, policy_file, fitness, failure_reason, screenshot_path, llm_reasoning, stagnation_counter=0, components=None):
         # Archive the policy file
         timestamp = int(time.time())
         archive_name = f"gen_{generation}_{timestamp}.py"
@@ -34,6 +34,8 @@ class EvolutionHistory:
             "generation": generation,
             "timestamp": timestamp,
             "fitness": fitness,
+            "components": components or {},
+            "stagnation_counter": stagnation_counter,
             "failure_reason": failure_reason,
             "screenshot": screenshot_path,
             "archive_path": archive_path,

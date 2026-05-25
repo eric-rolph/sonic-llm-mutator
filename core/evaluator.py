@@ -16,4 +16,11 @@ def calculate_fitness(x_max, frames_alive, rings, score):
     ring_score = rings * 10
     
     fitness = distance_score + speed_bonus + ring_score + score
-    return fitness
+    
+    components = {
+        "distance": distance_score,
+        "speed": speed_bonus,
+        "rings": ring_score,
+        "score": score
+    }
+    return fitness, components

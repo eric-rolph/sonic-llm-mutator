@@ -27,6 +27,9 @@ class SonicEnvWrapper:
         self.obs = self.env.reset()
         self.info = {}
         self.frame_count = 0
+        if hasattr(self, 'last_x'):
+            del self.last_x
+            del self.last_y
         return self.obs
 
     def get_screenshot(self, filepath="artifacts/failures/latest_screenshot.png"):
@@ -41,13 +44,25 @@ class SonicEnvWrapper:
 
     def get_state(self):
         """Returns the current relevant RAM values as a dict."""
-        # Note: The exact variables depend on the data.json in stable-retro for Sonic 1.
-        # Common ones are 'x', 'y', 'screen_x', 'screen_y', 'rings', 'lives', 'score'
-        # To get velocity, we might need to calculate it if it's not exposed, or read it if it is.
-        # For this prototype, we'll extract what we can and mock what isn't directly in data.json.
+        current_x = self.info.get('x', 0)
+        current_y = self.info.get('y', 0)
+        
+        # Calculate velocity if previous state exists
+        if not hasattr(self, 'last_x'):
+            self.last_x = current_x
+            self.last_y = current_y
+            
+        x_vel = current_x - self.last_x
+        y_vel = current_y - self.last_y
+        
+        self.last_x = current_x
+        self.last_y = current_y
+        
         return {
-            "x_pos": self.info.get('x', 0),
-            "y_pos": self.info.get('y', 0),
+            "x_pos": current_x,
+            "y_pos": current_y,
+            "x_velocity": x_vel,
+            "y_velocity": y_vel,
             "screen_x": self.info.get('screen_x', 0),
             "screen_y": self.info.get('screen_y', 0),
             "rings": self.info.get('rings', 0),
