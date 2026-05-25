@@ -13,7 +13,7 @@ def load_policy(filepath):
     spec.loader.exec_module(policy_module)
     return policy_module
 
-def run_evaluation_loop(max_generations=1, max_frames=200):
+def run_evaluation_loop(max_generations=10, max_frames=2000):
     # Initialize components
     history = EvolutionHistory()
     mutator = MutatorClient()

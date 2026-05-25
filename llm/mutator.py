@@ -81,7 +81,7 @@ def get_action(state):
         }
         
         try:
-            response = requests.post(self.lm_studio_url, json=payload, timeout=30)
+            response = requests.post(self.lm_studio_url, json=payload, timeout=300)
             response.raise_for_status()
             data = response.json()
             return data['choices'][0]['message']['content'], "Local inference completed."
