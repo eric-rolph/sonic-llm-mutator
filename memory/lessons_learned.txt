@@ -1,0 +1,4 @@
+- When at X=80, jump to avoid falling into a pit.
+- When at X=287, jump to avoid falling into the pit.
+def get_action(state):
+    return 'RIGHT'

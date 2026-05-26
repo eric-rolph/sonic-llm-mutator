@@ -112,9 +112,15 @@ def get_action(state):
             max_tokens=2048,
             timeout=300
         )
-        content = response.choices[0].message.content
-        if not content or not content.strip():
-            raise ValueError("LLM returned an empty string. Likely a concurrency/queue failure.")
+        content = response.choices[0].message.content or ""
+        reasoning_content = getattr(response.choices[0].message, "reasoning_content", "") or ""
+        
+        if not content.strip():
+            if reasoning_content.strip():
+                print("Content was empty, but reasoning_content found. Extracting from reasoning...")
+                content = reasoning_content
+            else:
+                raise ValueError("LLM returned an empty string and empty reasoning. Likely a concurrency/queue failure.")
             
         return content, "Local inference completed."
 
