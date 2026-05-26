@@ -1,12 +1,23 @@
 import os
-import requests
+import base64
 import json
 from llm.prompts import SYSTEM_PROMPT
+from openai import OpenAI
 
 class MutatorClient:
     def __init__(self):
-        self.gemini_api_key = os.environ.get("GEMINI_API_KEY")
-        self.lm_studio_url = "http://localhost:1234/v1/chat/completions"
+        # Cloud/Macro Model Config
+        self.macro_api_key = os.environ.get("MACRO_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+        # Default to Google's OpenAI-compatible endpoint if using Gemini directly
+        self.macro_base_url = os.environ.get("MACRO_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+        self.macro_model = os.environ.get("MACRO_MODEL", "gemini-2.5-pro")
+        
+        # Local/Micro Model Config
+        self.micro_base_url = os.environ.get("MICRO_BASE_URL", "http://localhost:1234/v1")
+        self.micro_model = os.environ.get("MICRO_MODEL", "local-model")
+        
+        self.macro_client = OpenAI(api_key=self.macro_api_key, base_url=self.macro_base_url) if self.macro_api_key else None
+        self.micro_client = OpenAI(api_key="not-needed", base_url=self.micro_base_url)
 
     def write_seed_policy(self, filepath):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -25,52 +36,64 @@ def get_action(state):
         with open(filepath, 'w') as f:
             f.write(seed_code.strip())
 
-    def _call_gemini(self, prompt, image_path):
-        """Calls Gemini for Macro-Mutations (needs vision)."""
-        if not self.gemini_api_key:
-            print("No GEMINI_API_KEY found, falling back to local LM Studio.")
-            return self._call_lm_studio(prompt)
-            
-        print("Using Gemini API for Macro-Mutation.")
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key={self.gemini_api_key}"
-            headers = {"Content-Type": "application/json"}
-            
-            payload = {
-                "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7}
-            }
-            
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
-            data = response.json()
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-            return text, "Gemini vision analysis completed."
-        except Exception as e:
-            print(f"Gemini API failed: {e}")
-            return self._call_lm_studio(prompt)
+    def _encode_image(self, image_path):
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
 
-    def _call_lm_studio(self, prompt, temperature=0.7):
-        """Calls LM Studio for Micro-Mutations (code only)."""
-        print(f"Using local LM Studio for Micro-Mutation (Temp: {temperature}).")
-        payload = {
-            "model": "local-model", # Uses whatever is loaded in LM Studio
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": temperature
-        }
-        
+    def _call_macro_model(self, prompt, image_path):
+        """Calls Cloud LLM for Macro-Mutations (needs vision)."""
+        if not self.macro_client:
+            print("No MACRO_API_KEY found, falling back to local Micro-Mutation model.")
+            return self._call_micro_model(prompt)
+            
+        print(f"Using Cloud API ({self.macro_model}) for Macro-Mutation.")
         try:
-            response = requests.post(self.lm_studio_url, json=payload, timeout=300)
-            response.raise_for_status()
-            data = response.json()
-            return data['choices'][0]['message']['content'], "Local inference completed."
+            base64_image = self._encode_image(image_path)
+            
+            response = self.macro_client.chat.completions.create(
+                model=self.macro_model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                temperature=0.7,
+                max_tokens=2048,
+                timeout=60
+            )
+            
+            return response.choices[0].message.content, "Cloud vision analysis completed."
         except Exception as e:
-            print(f"LM Studio local inference failed: {e}")
-            # Fallback trivial mutation so the loop doesn't crash completely
+            print(f"Cloud API failed: {e}")
+            return self._call_micro_model(prompt)
+
+    def _call_micro_model(self, prompt, temperature=0.7):
+        """Calls Local LLM for Micro-Mutations (code only)."""
+        print(f"Using Local API ({self.micro_base_url}) for Micro-Mutation (Temp: {temperature}).")
+        try:
+            response = self.micro_client.chat.completions.create(
+                model=self.micro_model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,
+                max_tokens=2048,
+                timeout=300
+            )
+            return response.choices[0].message.content, "Local inference completed."
+        except Exception as e:
+            print(f"Local inference failed: {e}")
             return "def get_action(state):\n    return 'RIGHT'", "Fallback to simple RIGHT."
 
     def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None):
@@ -99,11 +122,11 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         
         # Decide routing based on failure reason complexity
         if "stuck" in failure_reason.lower() or "timeout" in failure_reason.lower():
-            # Likely a physics/logic bug, LM studio can handle
-            raw_response, reasoning = self._call_lm_studio(prompt, temperature)
+            # Likely a physics/logic bug, local model can handle
+            raw_response, reasoning = self._call_micro_model(prompt, temperature)
         else:
             # Fatal error, died to enemy/pit. Needs visual analysis.
-            raw_response, reasoning = self._call_gemini(prompt, screenshot_path)
+            raw_response, reasoning = self._call_macro_model(prompt, screenshot_path)
             
         # Clean up markdown if the LLM wrapped it anyway
         if "```python" in raw_response:

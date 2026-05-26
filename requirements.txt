@@ -6,3 +6,4 @@ opencv-python
 
 pydantic
 requests
+openai

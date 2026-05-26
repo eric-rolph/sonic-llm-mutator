@@ -21,11 +21,14 @@ This project uses a Large Language Model (LLM) as a genetic algorithm mutator to
 4.  **Policies (`policies/`)**: Contains the generated Python scripts that decide the button presses for each frame.
 5.  **Web Dashboard (`dashboard.py`)**: A live Streamlit interface that tracks fitness progression and visually plays `.mp4` recordings of both the Champion and Latest mutation attempts.
 
-## Intelligent LLM Routing
+## Intelligent Universal LLM Routing
 
-To maximize efficiency and minimize API costs, the mutator (`llm/mutator.py`) intelligently routes its requests based on exactly *how* Sonic failed the previous run:
-*   **Local LLM (Micro-Mutations):** If Sonic fails due to getting "stuck" or "timing out", the pipeline assumes this is a physics or logic bug in the Python code. It passes the failure coordinate trace to a local, free LLM via LM Studio to debug the code and wiggle Sonic loose without needing visual context.
-*   **Google Gemini (Macro-Mutations):** If Sonic dies to a fatal hazard (like an enemy or a spike pit), the pipeline captures a screenshot of the death frame. This is sent to Gemini's multimodal vision model, which acts as the "eyes" to visually analyze the level architecture and rewrite the policy to incorporate evasive jumps.
+To maximize efficiency and minimize API costs, the mutator (`llm/mutator.py`) intelligently routes its requests based on exactly *how* Sonic failed the previous run. Using the standard OpenAI Python SDK, the pipeline universally supports almost every modern AI engine:
+
+*   **Local LLMs (Micro-Mutations):** If Sonic fails due to getting "stuck" or "timing out", the pipeline assumes this is a physics or logic bug in the Python code. It passes the failure coordinate trace to a **local, free LLM** to debug the code without needing visual context. 
+    *   *Supported:* **LM Studio, Ollama, llama.cpp, vLLM, SGLang, and Apple MLX** (any engine exposing a `/v1` endpoint).
+*   **Cloud LLMs (Macro-Mutations):** If Sonic dies to a fatal hazard (like an enemy or a spike pit), the pipeline captures a screenshot of the death frame. This is sent to a heavy-duty **cloud vision model**, which acts as the "eyes" to visually analyze the level architecture and rewrite the policy.
+    *   *Supported:* **Google Gemini, Anthropic Claude, OpenAI ChatGPT, Kimi (Moonshot), and OpenRouter.**
 
 ## Resilience Features
 
@@ -46,9 +49,16 @@ To ensure the pipeline can run continuously without manual intervention:
     ```bash
     python -m retro.import /path/to/your/roms
     ```
-3.  Configure API keys in your environment:
+3.  Configure API keys in your environment (Powershell example):
     ```bash
-    $env:GEMINI_API_KEY="your_api_key_here"
+    # Cloud Vision Provider (OpenRouter, Gemini, Anthropic, OpenAI, Kimi)
+    $env:MACRO_API_KEY="your_api_key_here"
+    $env:MACRO_BASE_URL="https://openrouter.ai/api/v1" # Or https://generativelanguage.googleapis.com/v1beta/openai/ for Gemini
+    $env:MACRO_MODEL="anthropic/claude-3.5-sonnet"     # Or gemini-2.5-pro, gpt-4o, etc.
+
+    # Local Code Provider (LM Studio, Ollama, llama.cpp, vLLM, Apple MLX)
+    $env:MICRO_BASE_URL="http://localhost:11434/v1"    # Ollama default. Use 1234 for LM Studio.
+    $env:MICRO_MODEL="qwen2.5-coder"                   # Your locally loaded model
     ```
 4.  Run the evolutionary pipeline:
     ```bash
