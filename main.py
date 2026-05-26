@@ -200,7 +200,8 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
                 pool_codes.append(f.read())
         
         import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n_candidates) as executor:
+        # Ensure max_workers=1 to prevent hammering local LLMs that don't support concurrency
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             futures = {}
             for c in range(n_candidates):
                 if len(pool_codes) >= 2 and random.random() < 0.30:

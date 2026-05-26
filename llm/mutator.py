@@ -112,7 +112,11 @@ def get_action(state):
             max_tokens=2048,
             timeout=300
         )
-        return response.choices[0].message.content, "Local inference completed."
+        content = response.choices[0].message.content
+        if not content or not content.strip():
+            raise ValueError("LLM returned an empty string. Likely a concurrency/queue failure.")
+            
+        return content, "Local inference completed."
 
     def extract_lesson(self, failure_reason, coordinate_trace):
         prompt = f"""
@@ -214,6 +218,7 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
             raw_response, reasoning = self._call_macro_model(prompt, screenshot_path)
             
         # Clean up markdown if the LLM wrapped it anyway
+        print(f"Raw Response from LLM (mutate): {repr(raw_response)}")
         if "```python" in raw_response:
             raw_response = raw_response.split("```python")[1].split("```")[0].strip()
         elif "```" in raw_response:
@@ -250,6 +255,7 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         raw_response, reasoning = self._call_micro_model(prompt, temperature)
         reasoning = "FunSearch Crossover Offspring"
         
+        print(f"Raw Response from LLM (crossover): {repr(raw_response)}")
         if "```python" in raw_response:
             raw_response = raw_response.split("```python")[1].split("```")[0].strip()
         elif "```" in raw_response:
