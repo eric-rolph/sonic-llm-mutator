@@ -21,6 +21,12 @@ This project uses a Large Language Model (LLM) as a genetic algorithm mutator to
 4.  **Policies (`policies/`)**: Contains the generated Python scripts that decide the button presses for each frame.
 5.  **Web Dashboard (`dashboard.py`)**: A live Streamlit interface that tracks fitness progression and visually plays `.mp4` recordings of both the Champion and Latest mutation attempts.
 
+## Intelligent LLM Routing
+
+To maximize efficiency and minimize API costs, the mutator (`llm/mutator.py`) intelligently routes its requests based on exactly *how* Sonic failed the previous run:
+*   **Local LLM (Micro-Mutations):** If Sonic fails due to getting "stuck" or "timing out", the pipeline assumes this is a physics or logic bug in the Python code. It passes the failure coordinate trace to a local, free LLM via LM Studio to debug the code and wiggle Sonic loose without needing visual context.
+*   **Google Gemini (Macro-Mutations):** If Sonic dies to a fatal hazard (like an enemy or a spike pit), the pipeline captures a screenshot of the death frame. This is sent to Gemini's multimodal vision model, which acts as the "eyes" to visually analyze the level architecture and rewrite the policy to incorporate evasive jumps.
+
 ## Resilience Features
 
 To ensure the pipeline can run continuously without manual intervention:
