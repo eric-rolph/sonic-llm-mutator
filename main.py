@@ -25,6 +25,9 @@ def evaluate_policy(env, policy, max_frames=5000):
     # Store coordinate trace
     trace = []
     
+    import concurrent.futures
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    
     while not done and frames_alive < max_frames:
         state = env.get_state()
         
@@ -32,11 +35,9 @@ def evaluate_policy(env, policy, max_frames=5000):
         if frames_alive % 30 == 0:
             trace.append((state.get('x_pos', 0), state.get('y_pos', 0)))
         
-        import concurrent.futures
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(policy.get_action, state)
-                action_string = future.result(timeout=0.5)
+            future = executor.submit(policy.get_action, state)
+            action_string = future.result(timeout=0.5)
         except concurrent.futures.TimeoutError:
             print("Policy timed out (infinite loop?)")
             action_string = ""
@@ -77,6 +78,8 @@ def evaluate_policy(env, policy, max_frames=5000):
     else:
         failure_reason = "Sonic lost a life or hit a fatal obstacle."
         
+    executor.shutdown(wait=False)
+    
     fitness, components = calculate_fitness(max_x, frames_alive, state.get('rings', 0), state.get('score', 0))
     screenshot_path = env.get_screenshot()
     
@@ -149,20 +152,35 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
         best_candidate_idx = -1
 
         # Generate candidates
-        candidates_code = []
+        candidates_code = [None] * n_candidates
         recent_history = history.get_recent_history(3)
-        for c in range(n_candidates):
-            temperature = 0.7 if c == 0 else 0.9
-            print(f"Requesting Mutation {c+1}/{n_candidates} (Temp: {temperature})...")
-            new_code, reasoning = mutator.mutate_policy(
-                working_code, 
-                last_failure_reason, 
-                last_screenshot, 
-                recent_history, 
-                temperature, 
-                last_trace
-            )
-            candidates_code.append((new_code, reasoning))
+        
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_candidates) as executor:
+            futures = {}
+            for c in range(n_candidates):
+                temperature = 0.7 if c == 0 else 0.9
+                print(f"Requesting Mutation {c+1}/{n_candidates} (Temp: {temperature})...")
+                future = executor.submit(
+                    mutator.mutate_policy,
+                    working_code, 
+                    last_failure_reason, 
+                    last_screenshot, 
+                    recent_history, 
+                    temperature, 
+                    last_trace
+                )
+                futures[future] = c
+                
+            for future in concurrent.futures.as_completed(futures):
+                c = futures[future]
+                try:
+                    new_code, reasoning = future.result()
+                    candidates_code[c] = (new_code, reasoning)
+                    print(f"Mutation {c+1} received.")
+                except Exception as e:
+                    print(f"Mutation {c+1} failed: {e}")
+                    candidates_code[c] = (working_code, f"Failed: {e}")
             
         # Evaluate candidates
         for c, (new_code, reasoning) in enumerate(candidates_code):

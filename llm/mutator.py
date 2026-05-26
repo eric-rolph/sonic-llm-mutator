@@ -3,6 +3,7 @@ import base64
 import json
 from llm.prompts import SYSTEM_PROMPT
 from openai import OpenAI
+from tenacity import retry, wait_exponential, stop_after_attempt
 
 class MutatorClient:
     def __init__(self):
@@ -48,53 +49,71 @@ def get_action(state):
             
         print(f"Using Cloud API ({self.macro_model}) for Macro-Mutation.")
         try:
-            base64_image = self._encode_image(image_path)
-            
-            response = self.macro_client.chat.completions.create(
-                model=self.macro_model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                temperature=0.7,
-                max_tokens=2048,
-                timeout=60
-            )
-            
-            return response.choices[0].message.content, "Cloud vision analysis completed."
+            return self._do_macro_call(prompt, image_path)
         except Exception as e:
-            print(f"Cloud API failed: {e}")
+            print(f"Cloud API failed after retries: {e}")
             return self._call_micro_model(prompt)
+
+    @retry(
+        wait=wait_exponential(multiplier=2, min=2, max=60),
+        stop=stop_after_attempt(5),
+        reraise=True
+    )
+    def _do_macro_call(self, prompt, image_path):
+        base64_image = self._encode_image(image_path)
+        
+        response = self.macro_client.chat.completions.create(
+            model=self.macro_model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.7,
+            max_tokens=2048,
+            timeout=60
+        )
+        
+        return response.choices[0].message.content, "Cloud vision analysis completed."
+
 
     def _call_micro_model(self, prompt, temperature=0.7):
         """Calls Local LLM for Micro-Mutations (code only)."""
         print(f"Using Local API ({self.micro_base_url}) for Micro-Mutation (Temp: {temperature}).")
         try:
-            response = self.micro_client.chat.completions.create(
-                model=self.micro_model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=temperature,
-                max_tokens=2048,
-                timeout=300
-            )
-            return response.choices[0].message.content, "Local inference completed."
+            return self._do_micro_call(prompt, temperature)
         except Exception as e:
-            print(f"Local inference failed: {e}")
+            print(f"Local inference failed after retries: {e}")
             return "def get_action(state):\n    return 'RIGHT'", "Fallback to simple RIGHT."
+
+    @retry(
+        wait=wait_exponential(multiplier=2, min=2, max=60),
+        stop=stop_after_attempt(3),
+        reraise=True
+    )
+    def _do_micro_call(self, prompt, temperature):
+        response = self.micro_client.chat.completions.create(
+            model=self.micro_model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature,
+            max_tokens=2048,
+            timeout=300
+        )
+        return response.choices[0].message.content, "Local inference completed."
+
 
     def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None):
         history_text = json.dumps(recent_history, indent=2)
