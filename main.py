@@ -14,13 +14,15 @@ def load_policy(filepath):
     spec.loader.exec_module(policy_module)
     return policy_module
 
-def evaluate_policy(env, policy, max_frames=5000):
+def evaluate_policy(env, policy, mutator, max_frames=5000):
     obs = env.reset()
     frames_alive = 0
     max_x = 0
     done = False
     stuck_counter = 0
     last_x = 0
+    
+    current_vision_context = "UNKNOWN"
     
     # Store coordinate trace
     trace = []
@@ -30,6 +32,14 @@ def evaluate_policy(env, policy, max_frames=5000):
     
     while not done and frames_alive < max_frames:
         state = env.get_state()
+        
+        # Proactive Vision Polling: every 300 frames (~5 sec)
+        if frames_alive % 300 == 0:
+            shot = env.get_screenshot()
+            if shot:
+                current_vision_context = mutator.analyze_environment(shot)
+        
+        state['vision_context'] = current_vision_context
         
         # Record trace every 30 frames (0.5 seconds at 60fps)
         if frames_alive % 30 == 0:
@@ -84,6 +94,32 @@ def evaluate_policy(env, policy, max_frames=5000):
     screenshot_path = env.get_screenshot()
     
     return fitness, frames_alive, max_x, failure_reason, screenshot_path, trace[-10:], components
+
+def update_pool(code, fitness):
+    import glob
+    os.makedirs("policies/pool", exist_ok=True)
+    pool_files = glob.glob("policies/pool/pool_*.py")
+    
+    pool = []
+    for f in pool_files:
+        try:
+            val = float(os.path.basename(f).replace("pool_", "").replace(".py", ""))
+            pool.append((val, f))
+        except:
+            pass
+            
+    new_path = f"policies/pool/pool_{fitness:.2f}.py"
+    with open(new_path, "w") as f:
+        f.write(code)
+    pool.append((fitness, new_path))
+    
+    pool.sort(key=lambda x: x[0], reverse=True)
+    while len(pool) > 3:
+        worst_val, worst_file = pool.pop()
+        try:
+            os.remove(worst_file)
+        except:
+            pass
 
 def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, stagnation_limit=5):
     history = EvolutionHistory()
@@ -155,21 +191,40 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
         candidates_code = [None] * n_candidates
         recent_history = history.get_recent_history(3)
         
+        import glob
+        import random
+        pool_files = glob.glob("policies/pool/pool_*.py")
+        pool_codes = []
+        for pf in pool_files:
+            with open(pf, "r") as f:
+                pool_codes.append(f.read())
+        
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_candidates) as executor:
             futures = {}
             for c in range(n_candidates):
-                temperature = 0.7 if c == 0 else 0.9
-                print(f"Requesting Mutation {c+1}/{n_candidates} (Temp: {temperature})...")
-                future = executor.submit(
-                    mutator.mutate_policy,
-                    working_code, 
-                    last_failure_reason, 
-                    last_screenshot, 
-                    recent_history, 
-                    temperature, 
-                    last_trace
-                )
+                if len(pool_codes) >= 2 and random.random() < 0.30:
+                    print(f"Requesting Crossover {c+1}/{n_candidates} (FunSearch)...")
+                    parent_a, parent_b = random.sample(pool_codes, 2)
+                    future = executor.submit(
+                        mutator.crossover_policies,
+                        parent_a,
+                        parent_b,
+                        recent_history,
+                        temperature=0.7
+                    )
+                else:
+                    temperature = 0.7 if c == 0 else 0.9
+                    print(f"Requesting Mutation {c+1}/{n_candidates} (Temp: {temperature})...")
+                    future = executor.submit(
+                        mutator.mutate_policy,
+                        working_code, 
+                        last_failure_reason, 
+                        last_screenshot, 
+                        recent_history, 
+                        temperature, 
+                        last_trace
+                    )
                 futures[future] = c
                 
             for future in concurrent.futures.as_completed(futures):
@@ -202,7 +257,7 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
                 trace = []
                 components = {}
             else:
-                fitness, frames_alive, max_x, failure_reason, screenshot_path, trace, components = evaluate_policy(env, policy, max_frames)
+                fitness, frames_alive, max_x, failure_reason, screenshot_path, trace, components = evaluate_policy(env, policy, mutator, max_frames)
                 print(f"Candidate {c+1} Fitness: {fitness:.2f} (Max X: {max_x}, Frames: {frames_alive})")
                 
                 # Flush the bk2 video buffer to disk (stable-retro only flushes on reset)
@@ -252,6 +307,9 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             with open(working_path, 'w') as f:
                 f.write(best_candidate_code)
                 
+            # Update the FunSearch genetic population pool
+            update_pool(best_candidate_code, best_candidate_fitness)
+                
             if best_candidate_fitness > all_time_champion_fitness:
                 print(f"NEW ALL-TIME CHAMPION! {all_time_champion_fitness:.2f} -> {best_candidate_fitness:.2f}")
                 all_time_champion_fitness = best_candidate_fitness
@@ -276,6 +334,14 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
         else:
             print(f"No candidate beat the working policy ({working_fitness:.2f}). Stagnation counter: {stagnation_counter + 1}")
             stagnation_counter += 1
+            
+            if "fatal" in best_candidate_reason.lower() or "stuck" in best_candidate_reason.lower() or "timeout" in best_candidate_reason.lower():
+                print("Extracting a lesson learned from this failure...")
+                try:
+                    mutator.extract_lesson(best_candidate_reason, best_candidate_trace)
+                except Exception as e:
+                    print(f"Failed to extract lesson: {e}")
+            
             # We log the generation even if it failed so the dashboard updates
             history.log_generation(gen, working_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
             
