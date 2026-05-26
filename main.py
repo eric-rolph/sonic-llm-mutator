@@ -89,29 +89,49 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
         env = None
 
     champion_path = os.path.join("policies", "champion_policy.py")
+    working_path = os.path.join("policies", "working_policy.py")
+    
     if not os.path.exists(champion_path):
         print("Creating initial seed policy.")
         mutator.write_seed_policy(champion_path)
         
-    champion_fitness = -1.0
+    if not os.path.exists(working_path):
+        import shutil
+        shutil.copy(champion_path, working_path)
+        
+    all_time_champion_fitness = -1.0
+    start_gen = 1
+    history_file = "artifacts/history.json"
+    if os.path.exists(history_file):
+        try:
+            import json
+            with open(history_file, "r") as f:
+                hist_data = json.load(f)
+                if hist_data:
+                    all_time_champion_fitness = max([entry.get('fitness', -1.0) for entry in hist_data])
+                    start_gen = hist_data[-1].get('generation', 0) + 1
+        except Exception as e:
+            print(f"Failed to load history for fitness: {e}")
+            
+    working_fitness = -1.0
     stagnation_counter = 0
     last_failure_reason = "Initial seed run"
     last_trace = []
     last_screenshot = None
 
-    for gen in range(1, max_generations + 1):
+    for gen in range(start_gen, max_generations + 1):
         print(f"\n--- Generation {gen} ---")
         
         if stagnation_counter >= stagnation_limit:
             print(f"Stagnation detected ({stagnation_counter} gens without improvement). Triggering blankRestart!")
-            mutator.write_seed_policy(champion_path)
-            champion_fitness = -1.0
+            mutator.write_seed_policy(working_path)
+            working_fitness = -1.0
             stagnation_counter = 0
             last_failure_reason = "blankRestart due to stagnation"
             last_trace = []
         
-        with open(champion_path, 'r') as f:
-            champion_code = f.read()
+        with open(working_path, 'r') as f:
+            working_code = f.read()
 
         best_candidate_code = None
         best_candidate_fitness = -1.0
@@ -129,7 +149,7 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             temperature = 0.7 if c == 0 else 0.9
             print(f"Requesting Mutation {c+1}/{n_candidates} (Temp: {temperature})...")
             new_code, reasoning = mutator.mutate_policy(
-                champion_code, 
+                working_code, 
                 last_failure_reason, 
                 last_screenshot, 
                 recent_history, 
@@ -189,33 +209,41 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             except Exception as e:
                 print(f"Failed to render video: {e}")
 
-        if best_candidate_fitness > champion_fitness:
-            print(f"New Champion found! Fitness improved from {champion_fitness:.2f} -> {best_candidate_fitness:.2f}")
-            champion_fitness = best_candidate_fitness
+        if best_candidate_fitness > working_fitness:
+            print(f"Working policy improved from {working_fitness:.2f} -> {best_candidate_fitness:.2f}")
+            working_fitness = best_candidate_fitness
             stagnation_counter = 0
             
-            # Convert video for new champion
-            champion_mp4 = "artifacts/videos/champion.mp4"
-            if os.path.exists(latest_mp4):
-                try:
-                    import shutil
-                    if os.path.exists(champion_mp4):
-                        os.remove(champion_mp4)
-                    shutil.copy(latest_mp4, champion_mp4)
-                except Exception as e:
-                    print(f"Failed to copy champion video: {e}")
+            # Update working file
+            with open(working_path, 'w') as f:
+                f.write(best_candidate_code)
+                
+            if best_candidate_fitness > all_time_champion_fitness:
+                print(f"NEW ALL-TIME CHAMPION! {all_time_champion_fitness:.2f} -> {best_candidate_fitness:.2f}")
+                all_time_champion_fitness = best_candidate_fitness
+                
+                # Convert video for new champion
+                champion_mp4 = "artifacts/videos/champion.mp4"
+                if os.path.exists(latest_mp4):
+                    try:
+                        import shutil
+                        if os.path.exists(champion_mp4):
+                            os.remove(champion_mp4)
+                        shutil.copy(latest_mp4, champion_mp4)
+                    except Exception as e:
+                        print(f"Failed to copy champion video: {e}")
+                
+                # Update all-time champion file
+                with open(champion_path, 'w') as f:
+                    f.write(best_candidate_code)
             
             # Archive the winning candidate
-            history.log_generation(gen, champion_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
-            
-            # Update champion file
-            with open(champion_path, 'w') as f:
-                f.write(best_candidate_code)
+            history.log_generation(gen, working_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
         else:
-            print(f"No candidate beat the champion ({champion_fitness:.2f}). Stagnation counter: {stagnation_counter + 1}")
+            print(f"No candidate beat the working policy ({working_fitness:.2f}). Stagnation counter: {stagnation_counter + 1}")
             stagnation_counter += 1
             # We log the generation even if it failed so the dashboard updates
-            history.log_generation(gen, champion_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
+            history.log_generation(gen, working_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
             
         last_failure_reason = best_candidate_reason
         last_trace = best_candidate_trace

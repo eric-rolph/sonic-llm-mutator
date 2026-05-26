@@ -93,6 +93,8 @@ Recent History of Failures:
 
 Analyze the failure and rewrite `get_action(state)`. 
 Return ONLY valid Python code, starting with `def get_action(state):`.
+
+(Random Seed for generation variance: {os.urandom(8).hex()})
 """
         
         # Decide routing based on failure reason complexity

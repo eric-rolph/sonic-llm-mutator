@@ -69,14 +69,16 @@ with col1:
         st.line_chart(df.set_index("generation")["fitness"])
         
         latest = history_data[-1]
+        all_time_champion_fitness = max([entry.get('fitness', -1) for entry in history_data]) if history_data else 0
         
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Current Champion Fitness", f"{latest['fitness']:.2f}")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("All-Time Champion Fitness 🏆", f"{all_time_champion_fitness:.2f}")
+        c2.metric("Latest Attempt Fitness 🧪", f"{latest['fitness']:.2f}")
         
         comps = latest.get("components", {})
-        c2.metric("Distance Score", f"{comps.get('distance', 0):.2f}")
-        c3.metric("Speed Bonus", f"{comps.get('speed', 0):.2f}")
-        c4.metric("Rings/Points", f"{comps.get('rings', 0) + comps.get('score', 0):.2f}")
+        c3.metric("Latest Distance", f"{comps.get('distance', 0):.2f}")
+        c4.metric("Latest Speed Bonus", f"{comps.get('speed', 0):.2f}")
+        c5.metric("Latest Rings/Pts", f"{comps.get('rings', 0) + comps.get('score', 0):.2f}")
         
         st.markdown("**LLM Reasoning for latest mutation:**")
         st.info(latest.get("llm_reasoning", "No reasoning provided."))
@@ -103,29 +105,46 @@ with col1:
 with col2:
     st.subheader("💻 AI Generated Python Policies")
     
-    tab1, tab2 = st.tabs(["🏆 Champion Policy", "🧪 Latest Mutation"])
+    # Load code strings
+    champ_code = ""
+    if os.path.exists(CHAMPION_PATH):
+        with open(CHAMPION_PATH, "r") as f:
+            champ_code = f.read()
+
+    latest_code = ""
+    archive_path = ""
+    if history_data:
+        archive_path = history_data[-1].get("archive_path", "")
+        if os.path.exists(archive_path):
+            with open(archive_path, "r") as f:
+                latest_code = f.read()
+
+    tab1, tab2, tab3 = st.tabs(["🏆 Champion Policy", "🧪 Latest Mutation", "🔍 Active Diff"])
     
     with tab1:
-        if os.path.exists(CHAMPION_PATH):
-            with open(CHAMPION_PATH, "r") as f:
-                code = f.read()
-            st.code(code, language="python")
+        if champ_code:
+            st.code(champ_code, language="python")
         else:
             st.info("Champion policy file not found.")
             
     with tab2:
-        # Find the latest archive file based on the history
-        if history_data:
-            latest = history_data[-1]
-            archive_path = latest.get("archive_path", "")
-            if os.path.exists(archive_path):
-                with open(archive_path, "r") as f:
-                    latest_code = f.read()
-                st.code(latest_code, language="python")
-            else:
-                st.info(f"Latest policy file not found at {archive_path}")
+        if latest_code:
+            st.code(latest_code, language="python")
         else:
-            st.info("No history yet.")
+            st.info(f"Latest policy file not found at {archive_path}")
+
+    with tab3:
+        if champ_code and latest_code:
+            import difflib
+            champ_lines = champ_code.splitlines(keepends=True)
+            latest_lines = latest_code.splitlines(keepends=True)
+            diff = list(difflib.unified_diff(champ_lines, latest_lines, fromfile='Champion', tofile='Latest', n=3))
+            if diff:
+                st.code("".join(diff), language="diff")
+            else:
+                st.info("No differences found between Champion and Latest policy. (They are identical)")
+        else:
+            st.info("Need both Champion and Latest files to compute diff.")
 
 st.markdown("---")
 st.caption("Powered by Qwen3.6-27B (LM Studio) & stable-retro")
