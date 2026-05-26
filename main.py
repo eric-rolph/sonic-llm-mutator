@@ -32,8 +32,16 @@ def evaluate_policy(env, policy, max_frames=5000):
         if frames_alive % 30 == 0:
             trace.append((state.get('x_pos', 0), state.get('y_pos', 0)))
         
+        import concurrent.futures
         try:
-            action_string = policy.get_action(state)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(policy.get_action, state)
+                action_string = future.result(timeout=0.5)
+        except concurrent.futures.TimeoutError:
+            print("Policy timed out (infinite loop?)")
+            action_string = ""
+            done = True
+            break
         except Exception as e:
             print(f"Policy threw exception: {e}")
             action_string = "RIGHT"
@@ -51,17 +59,15 @@ def evaluate_policy(env, policy, max_frames=5000):
         if current_x > max_x:
             max_x = current_x
             stuck_counter = 0
-        elif current_x <= last_x + 1:
-            stuck_counter += 1
         else:
-            stuck_counter = 0
+            stuck_counter += 1
             
         last_x = current_x
         
-        if stuck_counter > 300:
+        if stuck_counter > 500:
             print("Sonic got stuck! Terminating run.")
             done = True
-            failure_reason = "Sonic stopped making forward progress for 5 seconds."
+            failure_reason = "Sonic stopped making forward progress for 8 seconds."
             break
             
     if frames_alive >= max_frames:
@@ -83,8 +89,10 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
     try:
         from emulator.sonic_env import SonicEnvWrapper
         os.makedirs("artifacts/videos/tmp", exist_ok=True)
+        env = SonicEnvWrapper(record_path="artifacts/videos/tmp")
     except ImportError:
         print("Warning: stable-retro not installed. Running in dry-run mode.")
+        env = None
 
     champion_path = os.path.join("policies", "champion_policy.py")
     working_path = os.path.join("policies", "working_policy.py")
@@ -168,12 +176,6 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             except Exception as e:
                 print(f"Failed to load policy (SyntaxError?): {e}")
                 policy = None
-            
-            try:
-                from emulator.sonic_env import SonicEnvWrapper
-                env = SonicEnvWrapper(record_path="artifacts/videos/tmp")
-            except ImportError:
-                env = None
                 
             if env is None or policy is None:
                 fitness = 0.0
@@ -190,7 +192,6 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
                     env.reset()
                 except Exception:
                     pass
-                env.close()
                 
                 import glob
                 bk2_files = glob.glob("artifacts/videos/tmp/*.bk2")
@@ -220,7 +221,7 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             import subprocess
             print(f"Rendering video for generation's best candidate...")
             try:
-                subprocess.run([sys.executable, "render_video.py", best_bk2, latest_mp4], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen([sys.executable, "render_video.py", best_bk2, latest_mp4], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
                 print(f"Failed to render video: {e}")
 

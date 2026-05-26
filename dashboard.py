@@ -147,4 +147,4 @@ with col2:
             st.info("Need both Champion and Latest files to compute diff.")
 
 st.markdown("---")
-st.caption("Powered by Qwen3.6-27B (LM Studio) & stable-retro")
+st.caption("Powered by Gemini API, LM Studio & stable-retro")
