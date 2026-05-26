@@ -83,10 +83,8 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
     try:
         from emulator.sonic_env import SonicEnvWrapper
         os.makedirs("artifacts/videos/tmp", exist_ok=True)
-        env = SonicEnvWrapper(record_path="artifacts/videos/tmp")
     except ImportError:
         print("Warning: stable-retro not installed. Running in dry-run mode.")
-        env = None
 
     champion_path = os.path.join("policies", "champion_policy.py")
     working_path = os.path.join("policies", "working_policy.py")
@@ -165,9 +163,19 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             with open(candidate_path, 'w') as f:
                 f.write(new_code)
                 
-            policy = load_policy(candidate_path)
+            try:
+                policy = load_policy(candidate_path)
+            except Exception as e:
+                print(f"Failed to load policy (SyntaxError?): {e}")
+                policy = None
             
-            if env is None:
+            try:
+                from emulator.sonic_env import SonicEnvWrapper
+                env = SonicEnvWrapper(record_path="artifacts/videos/tmp")
+            except ImportError:
+                env = None
+                
+            if env is None or policy is None:
                 fitness = 0.0
                 failure_reason = "Mock failure."
                 screenshot_path = "artifacts/failures/mock_screenshot.png"
@@ -176,6 +184,13 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             else:
                 fitness, frames_alive, max_x, failure_reason, screenshot_path, trace, components = evaluate_policy(env, policy, max_frames)
                 print(f"Candidate {c+1} Fitness: {fitness:.2f} (Max X: {max_x}, Frames: {frames_alive})")
+                
+                # Flush the bk2 video buffer to disk (stable-retro only flushes on reset)
+                try:
+                    env.reset()
+                except Exception:
+                    pass
+                env.close()
                 
                 import glob
                 bk2_files = glob.glob("artifacts/videos/tmp/*.bk2")
