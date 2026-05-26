@@ -3,6 +3,11 @@
 ![Dashboard Screenshot](docs/dashboard.png)
 This project uses a Large Language Model (LLM) as a genetic algorithm mutator to learn how to play Sonic the Hedgehog. The system leverages `stable-retro` as the emulator, decoupled via an MCP server, and employs a local CI/CD pipeline script to iteratively test and evolve the Python script that controls Sonic.
 
+## Watch it in Action
+
+[![Sonic Run 227](https://img.youtube.com/vi/5gRK_w-sXaI/maxresdefault.jpg)](https://www.youtube.com/watch?v=5gRK_w-sXaI)
+*A sample run showcasing the AI's learned policy after 227 generations of automated LLM mutation.*
+
 ## Architecture
 
 1.  **Emulator MCP Server (`emulator/`)**: Wraps `stable-retro` and exposes Sonic's game state (velocity, coordinates, surrounding tiles) as discrete tools.
