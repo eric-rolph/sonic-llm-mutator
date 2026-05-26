@@ -5,7 +5,7 @@ This project uses a Large Language Model (LLM) as a genetic algorithm mutator to
 
 ## Watch it in Action
 
-[![Sonic Run 227](https://img.youtube.com/vi/5gRK_w-sXaI/maxresdefault.jpg)](https://www.youtube.com/watch?v=5gRK_w-sXaI)
+[![Sonic Run 227](https://img.youtube.com/vi/5gRK_w-sXaI/0.jpg)](https://www.youtube.com/watch?v=5gRK_w-sXaI)
 *A sample run showcasing the AI's learned policy after 227 generations of automated LLM mutation.*
 
 ## Architecture
