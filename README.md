@@ -16,7 +16,7 @@ This project uses a Large Language Model (LLM) as a genetic algorithm mutator to
 ## Architecture
 
 1.  **Emulator MCP Server (`emulator/`)**: Wraps `stable-retro` and exposes Sonic's game state (velocity, coordinates, surrounding tiles) as discrete tools.
-2.  **LLM Mutator (`llm/`)**: Acts as the genetic mutation engine. It queries the MCP server when Sonic dies to understand the failure context, then rewrites the control policy. It routes heavy visual debugging to Google Gemini and minor tweaks to a local LLM via LM Studio.
+2.  **LLM Mutator (`llm/`)**: Acts as the genetic mutation engine. It queries the MCP server when Sonic dies to understand the failure context, then rewrites the control policy. It routes heavy visual debugging to a cloud vision model (like OpenRouter or Gemini) and minor tweaks to any local LLM (like Ollama or LM Studio).
 3.  **Core Orchestrator (`core/` & `main.py`)**: Runs the current policy, calculates fitness (penalizing stagnation), and manages the automated evolutionary pipeline.
 4.  **Policies (`policies/`)**: Contains the generated Python scripts that decide the button presses for each frame.
 5.  **Web Dashboard (`dashboard.py`)**: A live Streamlit interface that tracks fitness progression and visually plays `.mp4` recordings of both the Champion and Latest mutation attempts.
