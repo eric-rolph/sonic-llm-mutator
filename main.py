@@ -192,7 +192,7 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
         os.makedirs("artifacts/videos/tmp", exist_ok=True)
         env = SonicEnvWrapper(record_path="artifacts/videos/tmp")
     except ImportError:
-        print("Warning: stable-retro not installed. Running in dry-run mode.")
+        print("Warning: retro emulator backend not available. Running in dry-run mode.")
         env = None
 
     champion_path = os.path.join("policies", "champion_policy.py")

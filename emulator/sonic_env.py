@@ -1,16 +1,78 @@
-import retro
+import importlib
 import cv2
 import os
-import json
-import numpy as np
+
+
+DEFAULT_GAME = "SonicTheHedgehog-Genesis"
+DEFAULT_STATE = "GreenHillZone.Act1"
+DEFAULT_BACKEND = "auto"
+
+
+def normalize_backend_name(backend):
+    requested = (backend or os.environ.get("SONIC_RETRO_BACKEND", DEFAULT_BACKEND)).lower()
+    aliases = {
+        "gym-retro": "legacy",
+        "retro": "legacy",
+        "legacy": "legacy",
+        "stable-retro": "stable",
+        "stable_retro": "stable",
+        "stable": "stable",
+        "auto": "auto",
+    }
+    if requested not in aliases:
+        raise ValueError(f"Unsupported retro backend: {backend}")
+    return aliases[requested]
+
+
+def resolve_backend_module(backend=None):
+    normalized = normalize_backend_name(backend)
+    if normalized == "auto":
+        try:
+            return importlib.import_module("stable_retro"), "stable"
+        except ImportError:
+            return importlib.import_module("retro"), "legacy"
+    if normalized == "stable":
+        return importlib.import_module("stable_retro"), "stable"
+    return importlib.import_module("retro"), "legacy"
+
+
+def make_retro_env(module, game=DEFAULT_GAME, state=DEFAULT_STATE, record_path=None, **extra_kwargs):
+    kwargs = {"game": game, "state": state, **extra_kwargs}
+    if record_path is not None:
+        kwargs["record"] = record_path
+
+    try:
+        return module.make(**kwargs)
+    except Exception:
+        if getattr(module, "__name__", "") == "stable_retro" and not str(game).endswith("-v0"):
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["game"] = f"{game}-v0"
+            return module.make(**retry_kwargs)
+        raise
+
+
+def normalize_reset_result(result):
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    return result, {}
+
+
+def normalize_step_result(result):
+    if isinstance(result, tuple) and len(result) == 5:
+        obs, reward, terminated, truncated, info = result
+        return obs, reward, bool(terminated or truncated), info
+    if isinstance(result, tuple) and len(result) == 4:
+        return result
+    raise ValueError(f"Unsupported emulator step result: {result!r}")
+
 
 class SonicEnvWrapper:
-    def __init__(self, state='GreenHillZone.Act1', record_path=None):
-        self.env = retro.make(game='SonicTheHedgehog-Genesis', state=state, record=record_path)
-        self.obs = self.env.reset()
-        self.info = {}
+    def __init__(self, state=DEFAULT_STATE, record_path=None, backend=None, game=DEFAULT_GAME, retro_module=None):
+        self.module, self.backend = (retro_module, normalize_backend_name(backend)) if retro_module else resolve_backend_module(backend)
+        self.env = make_retro_env(self.module, game=game, state=state, record_path=record_path)
+        self.obs, self.info = normalize_reset_result(self.env.reset())
         self.frame_count = 0
-        
+
     def step(self, action):
         """
         Executes an action and advances the environment.
@@ -19,13 +81,12 @@ class SonicEnvWrapper:
         For Genesis: usually B, A, Mode, Start, Up, Down, Left, Right, C, Y, X, Z
         Stable-retro standard Genesis mapping: B, A, MODE, START, UP, DOWN, LEFT, RIGHT, C, Y, X, Z
         """
-        self.obs, reward, done, self.info = self.env.step(action)
+        self.obs, reward, done, self.info = normalize_step_result(self.env.step(action))
         self.frame_count += 1
         return self.obs, reward, done, self.info
 
     def reset(self):
-        self.obs = self.env.reset()
-        self.info = {}
+        self.obs, self.info = normalize_reset_result(self.env.reset())
         self.frame_count = 0
         if hasattr(self, 'last_x'):
             del self.last_x
@@ -75,7 +136,7 @@ class SonicEnvWrapper:
 
 if __name__ == "__main__":
     env = SonicEnvWrapper()
-    print("Environment initialized.")
+    print(f"Environment initialized with backend: {env.backend}")
     env.reset()
     action = env.env.action_space.sample()
     obs, rew, done, info = env.step(action)

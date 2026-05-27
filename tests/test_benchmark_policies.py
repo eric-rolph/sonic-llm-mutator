@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import benchmark_policies
 
@@ -39,6 +40,29 @@ class BenchmarkPoliciesTests(unittest.TestCase):
             benchmark_policies.policy_label("policies/champion_policy.py"),
             "champion_policy",
         )
+
+    def test_parse_args_accepts_backend_choice(self):
+        args = benchmark_policies.parse_args(["--backend", "stable"])
+
+        self.assertEqual(args.backend, "stable")
+
+    def test_run_benchmark_reports_backend_failures_as_rows(self):
+        with patch.object(
+            benchmark_policies,
+            "evaluate_policy_on_state",
+            side_effect=ImportError("No module named stable_retro"),
+        ):
+            rows = benchmark_policies.run_benchmark(
+                policy_paths=["README.md"],
+                states=["GreenHillZone.Act1"],
+                max_frames=10,
+                backend="stable",
+            )
+
+        self.assertEqual(rows[0]["backend"], "stable")
+        self.assertEqual(rows[0]["policy"], "README")
+        self.assertIn("Benchmark failed", rows[0]["reason"])
+        self.assertIn("stable_retro", rows[0]["reason"])
 
 
 if __name__ == "__main__":

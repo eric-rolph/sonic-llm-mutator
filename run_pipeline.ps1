@@ -15,11 +15,11 @@ if (Test-Path ".\venv38\Scripts\Activate.ps1") {
 }
 
 # 2. Check if ROM is imported
-$retroPath = python -c "import retro; print(retro.__path__[0])"
+$retroPath = python -c "import importlib.util; name = 'stable_retro' if importlib.util.find_spec('stable_retro') else 'retro'; module = __import__(name); print(module.__path__[0])"
 $romPath = Join-Path $retroPath "data\stable\SonicTheHedgehog-Genesis\rom.md"
 
 if (-Not (Test-Path $romPath)) {
-    Write-Host "Sonic ROM not found in stable-retro data directory." -ForegroundColor Yellow
+    Write-Host "Sonic ROM not found in retro backend data directory." -ForegroundColor Yellow
     Write-Host "Attempting to copy from Downloads..."
     $sourceRom = "C:\Users\ericr\Downloads\Sonic_The_Hedgehog_W_REV01_h3C.bin"
     if (Test-Path $sourceRom) {

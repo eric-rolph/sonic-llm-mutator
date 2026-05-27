@@ -27,6 +27,20 @@ class NoVisionMutator:
         return "UNKNOWN"
 
 
+def failure_row(state, backend, policy_path, reason):
+    return {
+        "state": state,
+        "backend": backend,
+        "policy": policy_label(policy_path),
+        "fitness": 0.0,
+        "max_x": 0,
+        "frames": 0,
+        "reason": reason,
+        "trace": [],
+        "components": {},
+    }
+
+
 def policy_label(policy_path):
     return Path(policy_path).stem
 
@@ -44,11 +58,11 @@ def load_policy(policy_path):
     return module
 
 
-def evaluate_policy_on_state(policy_path, state, max_frames):
+def evaluate_policy_on_state(policy_path, state, max_frames, backend="auto"):
     from emulator.sonic_env import SonicEnvWrapper
 
     policy = load_policy(policy_path)
-    env = SonicEnvWrapper(state=state, record_path=None)
+    env = SonicEnvWrapper(state=state, record_path=None, backend=backend)
     try:
         fitness, frames, max_x, reason, _, trace, components = evaluate_policy(
             env,
@@ -62,6 +76,7 @@ def evaluate_policy_on_state(policy_path, state, max_frames):
 
     return {
         "state": state,
+        "backend": env.backend,
         "policy": policy_label(policy_path),
         "fitness": round(float(fitness), 2),
         "max_x": int(max_x),
@@ -72,7 +87,7 @@ def evaluate_policy_on_state(policy_path, state, max_frames):
     }
 
 
-def run_benchmark(policy_paths=None, states=None, max_frames=5000):
+def run_benchmark(policy_paths=None, states=None, max_frames=5000, backend="auto"):
     selected_policies = policy_paths or DEFAULT_POLICIES
     selected_states = states or DEFAULT_STATES
     rows = []
@@ -80,31 +95,24 @@ def run_benchmark(policy_paths=None, states=None, max_frames=5000):
     for state in selected_states:
         for policy_path in selected_policies:
             if not os.path.exists(policy_path):
-                rows.append(
-                    {
-                        "state": state,
-                        "policy": policy_label(policy_path),
-                        "fitness": 0.0,
-                        "max_x": 0,
-                        "frames": 0,
-                        "reason": f"Policy file not found: {policy_path}",
-                        "trace": [],
-                        "components": {},
-                    }
-                )
+                rows.append(failure_row(state, backend, policy_path, f"Policy file not found: {policy_path}"))
                 continue
-            rows.append(evaluate_policy_on_state(policy_path, state, max_frames))
+            try:
+                rows.append(evaluate_policy_on_state(policy_path, state, max_frames, backend=backend))
+            except Exception as e:
+                rows.append(failure_row(state, backend, policy_path, f"Benchmark failed: {e}"))
 
     return rows
 
 
 def format_results_table(rows):
-    columns = ["state", "policy", "fitness", "max_x", "frames", "reason"]
+    columns = ["state", "backend", "policy", "fitness", "max_x", "frames", "reason"]
     normalized = []
     for row in rows:
         normalized.append(
             {
                 "state": str(row["state"]),
+                "backend": str(row.get("backend", "")),
                 "policy": str(row["policy"]),
                 "fitness": f"{float(row['fitness']):.2f}",
                 "max_x": str(row["max_x"]),
@@ -131,13 +139,14 @@ def parse_args(argv=None):
     parser.add_argument("--states", nargs="+", default=DEFAULT_STATES)
     parser.add_argument("--policies", nargs="+", default=DEFAULT_POLICIES)
     parser.add_argument("--max-frames", type=int, default=5000)
+    parser.add_argument("--backend", choices=["auto", "stable", "legacy"], default="auto")
     parser.add_argument("--json", action="store_true", help="Emit raw JSON instead of a table.")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    rows = run_benchmark(args.policies, args.states, args.max_frames)
+    rows = run_benchmark(args.policies, args.states, args.max_frames, backend=args.backend)
     if args.json:
         print(json.dumps(rows, indent=2))
     else:
