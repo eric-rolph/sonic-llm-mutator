@@ -95,6 +95,13 @@ def select_relevant_lessons(lessons, current_x, radius=1000, limit=10):
     return relevant[-limit:]
 
 
+def normalize_vision_context(content):
+    if not content:
+        return "UNKNOWN"
+    normalized = str(content).strip().upper()
+    return normalized or "UNKNOWN"
+
+
 class MutatorClient:
     def __init__(self):
         # Cloud/Macro Model Config
@@ -133,6 +140,9 @@ def get_action(state):
 
     def _call_macro_model(self, prompt, image_path):
         """Calls Cloud LLM for Macro-Mutations (needs vision)."""
+        if not image_path:
+            print("No screenshot available, falling back to local Micro-Mutation model.")
+            return self._call_micro_model(prompt)
         if not self.macro_client:
             print("No MACRO_API_KEY found, falling back to local Micro-Mutation model.")
             return self._call_micro_model(prompt)
@@ -278,7 +288,7 @@ Return ONLY a valid JSON object in this exact format:
                 max_tokens=10,
                 timeout=20
             )
-            return response.choices[0].message.content.strip().upper()
+            return normalize_vision_context(response.choices[0].message.content)
         except Exception as e:
             print(f"Proactive vision analysis failed: {e}")
             return "UNKNOWN"
@@ -378,7 +388,7 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
 """
         
         # Decide routing based on failure reason complexity
-        if "stuck" in failure_reason.lower() or "timeout" in failure_reason.lower():
+        if "stuck" in failure_reason.lower() or "timeout" in failure_reason.lower() or not screenshot_path:
             # Likely a physics/logic bug, local model can handle
             raw_response, reasoning = self._call_micro_model(prompt, temperature)
         else:

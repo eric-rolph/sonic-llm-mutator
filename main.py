@@ -15,6 +15,57 @@ def load_policy(filepath):
     spec.loader.exec_module(policy_module)
     return policy_module
 
+
+def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbose=True):
+    context = {
+        "working_fitness": -1.0,
+        "last_failure_reason": "Initial seed run",
+        "last_screenshot": None,
+        "last_trace": [],
+    }
+    if env is None or not os.path.exists(working_path):
+        return context
+
+    try:
+        policy = load_policy(working_path)
+    except Exception as e:
+        context["last_failure_reason"] = f"Failed to load working policy: {e}"
+        return context
+
+    if verbose:
+        print("Evaluating current working policy baseline...")
+    fitness, frames_alive, max_x, failure_reason, screenshot_path, trace, components = evaluate_policy(
+        env,
+        policy,
+        mutator,
+        max_frames=max_frames,
+        verbose=verbose,
+    )
+    if verbose:
+        print(f"Baseline Fitness: {fitness:.2f} (Max X: {max_x}, Frames: {frames_alive})")
+
+    context.update(
+        {
+            "working_fitness": fitness,
+            "last_failure_reason": failure_reason,
+            "last_screenshot": screenshot_path,
+            "last_trace": trace,
+        }
+    )
+    return context
+
+
+def build_policy_load_failure(error):
+    reason = f"Policy failed to load: {error}"
+    return 0.0, 0, 0, reason, None, [], {"load_error": str(error)}
+
+
+def clear_candidate_recording(record_dir, candidate_idx):
+    candidate_bk2_path = os.path.join(record_dir, f"candidate_{candidate_idx}.bk2")
+    if os.path.exists(candidate_bk2_path):
+        os.remove(candidate_bk2_path)
+
+
 def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True):
     obs = env.reset()
     frames_alive = 0
@@ -169,11 +220,12 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
         except Exception as e:
             print(f"Failed to load history for fitness: {e}")
             
-    working_fitness = -1.0
     stagnation_counter = 0
-    last_failure_reason = "Initial seed run"
-    last_trace = []
-    last_screenshot = None
+    baseline_context = evaluate_working_baseline(env, working_path, mutator, max_frames)
+    working_fitness = baseline_context["working_fitness"]
+    last_failure_reason = baseline_context["last_failure_reason"]
+    last_trace = baseline_context["last_trace"]
+    last_screenshot = baseline_context["last_screenshot"]
 
     for gen in range(start_gen, max_generations + 1):
         print(f"\n--- Generation {gen} ---")
@@ -253,21 +305,26 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
         for c, (new_code, reasoning) in enumerate(candidates_code):
             print(f"\nEvaluating Candidate {c+1}...")
             candidate_path = os.path.join("policies", f"candidate_{c}.py")
+            clear_candidate_recording("artifacts/videos/tmp", c)
             with open(candidate_path, 'w') as f:
                 f.write(new_code)
-                
+
+            load_error = None
             try:
                 policy = load_policy(candidate_path)
             except Exception as e:
                 print(f"Failed to load policy (SyntaxError?): {e}")
+                load_error = e
                 policy = None
-                
-            if env is None or policy is None:
+
+            if env is None:
                 fitness = 0.0
                 failure_reason = "Mock failure."
                 screenshot_path = "artifacts/failures/mock_screenshot.png"
                 trace = []
                 components = {}
+            elif policy is None:
+                fitness, frames_alive, max_x, failure_reason, screenshot_path, trace, components = build_policy_load_failure(load_error)
             else:
                 fitness, frames_alive, max_x, failure_reason, screenshot_path, trace, components = evaluate_policy(env, policy, mutator, max_frames)
                 print(f"Candidate {c+1} Fitness: {fitness:.2f} (Max X: {max_x}, Frames: {frames_alive})")
