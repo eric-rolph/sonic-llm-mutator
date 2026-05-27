@@ -5,6 +5,96 @@ from llm.prompts import SYSTEM_PROMPT
 from openai import OpenAI
 from tenacity import retry, wait_exponential, stop_after_attempt
 
+
+def extract_json_object(text):
+    """Extract the first valid JSON object from raw or fenced model output."""
+    if not text:
+        return None
+
+    candidates = [text.strip()]
+    if "```" in text:
+        parts = text.split("```")
+        for part in parts[1::2]:
+            cleaned = part.strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+            candidates.append(cleaned)
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidates.append(text[start:end + 1])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def normalize_lesson(entry):
+    """Return a compact semantic lesson dict, or None for malformed entries."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        x = int(float(entry.get("x")))
+    except (TypeError, ValueError):
+        return None
+
+    lesson = str(entry.get("lesson", "")).strip()
+    if not lesson:
+        return None
+
+    hazard = str(entry.get("hazard", "Unknown")).strip() or "Unknown"
+    return {"x": x, "hazard": hazard, "lesson": lesson}
+
+
+def dedupe_lessons(lessons, x_tolerance=25):
+    """Collapse malformed and duplicate nearby lessons while preserving order."""
+    deduped = []
+    for lesson in lessons:
+        normalized = normalize_lesson(lesson)
+        if normalized is None:
+            continue
+
+        lesson_key = normalized["lesson"].casefold()
+        duplicate = False
+        for existing in deduped:
+            if (
+                abs(existing["x"] - normalized["x"]) <= x_tolerance
+                and existing["lesson"].casefold() == lesson_key
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            deduped.append(normalized)
+    return deduped
+
+
+def load_semantic_bank(path="memory/semantic_bank.json"):
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw_bank = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw_bank, list):
+        return []
+    return dedupe_lessons(raw_bank)
+
+
+def select_relevant_lessons(lessons, current_x, radius=1000, limit=10):
+    relevant = []
+    for lesson in dedupe_lessons(lessons):
+        if abs(lesson["x"] - current_x) <= radius:
+            relevant.append(f"- {lesson['lesson']}")
+    return relevant[-limit:]
+
+
 class MutatorClient:
     def __init__(self):
         # Cloud/Macro Model Config
@@ -109,7 +199,7 @@ def get_action(state):
                 {"role": "user", "content": prompt}
             ],
             temperature=temperature,
-            max_tokens=2048,
+            max_tokens=8192,
             timeout=300
         )
         content = response.choices[0].message.content or ""
@@ -130,15 +220,28 @@ We failed with the following reason: {failure_reason}
 Coordinate trace: {coordinate_trace}
 
 Based on this failure, extract a single, concise, universal rule (a 'lesson learned') for the AI policy to avoid this in the future.
-Format it EXACTLY as: "- When at X=[approximate], [action to take] to avoid [hazard]."
-Return ONLY the single bullet point.
+Analyze the coordinate trace. At what approximate X coordinate did the failure occur?
+Return ONLY a valid JSON object in this exact format:
+{{
+    "x": 1500,
+    "hazard": "Name of hazard",
+    "lesson": "When at X=1500, do X to avoid Y"
+}}
 """
-        lesson, _ = self._call_micro_model(prompt, temperature=0.3)
-        if lesson:
-            os.makedirs("memory", exist_ok=True)
-            with open("memory/lessons_learned.txt", "a") as f:
-                f.write(f"{lesson.strip()}\n")
-            print(f"Extracted and saved lesson: {lesson.strip()}")
+        lesson_json_str, _ = self._call_micro_model(prompt, temperature=0.3)
+        lesson_data = normalize_lesson(extract_json_object(lesson_json_str))
+        if lesson_data is None:
+            print("Failed to parse semantic lesson JSON.")
+            return
+
+        os.makedirs("memory", exist_ok=True)
+        bank_path = "memory/semantic_bank.json"
+        bank = load_semantic_bank(bank_path)
+        bank.append(lesson_data)
+        bank = dedupe_lessons(bank)
+        with open(bank_path, "w", encoding="utf-8") as f:
+            json.dump(bank, f, indent=4)
+        print(f"Extracted and saved semantic lesson: {lesson_data.get('lesson')}")
 
     @retry(
         wait=wait_exponential(multiplier=2, min=2, max=60),
@@ -182,16 +285,73 @@ Return ONLY the single bullet point.
 
 
 
+    def extract_and_save_skills(self, policy_code):
+        skills_path = "policies/skills.py"
+        existing_skills = ""
+        if os.path.exists(skills_path):
+            with open(skills_path, "r") as f:
+                existing_skills = f.read()
+
+        prompt = f"""
+We have discovered a highly successful AI policy:
+```python
+{policy_code}
+```
+
+Here is the current skill library:
+```python
+{existing_skills}
+```
+
+Extract any clear, reusable logic from the successful policy into standalone Python functions (skills).
+Return ONLY valid Python code containing the updated skill library (the existing skills plus any new ones). Do NOT include `get_action`.
+"""
+        new_skills_code, _ = self._call_micro_model(prompt, temperature=0.3)
+
+        if new_skills_code:
+            try:
+                if "```python" in new_skills_code:
+                    new_skills_code = new_skills_code.split("```python")[-1].split("```")[0].strip()
+                elif "```" in new_skills_code:
+                    parts = new_skills_code.split("```")
+                    new_skills_code = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
+
+                os.makedirs("policies", exist_ok=True)
+                with open(skills_path, "w") as f:
+                    f.write(new_skills_code)
+                print("Extracted and saved new skills to policies/skills.py")
+            except Exception as e:
+                print(f"Failed to save extracted skills: {e}")
+
     def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None):
         history_text = json.dumps(recent_history, indent=2)
         trace_text = ""
+        current_x = 0
         if coordinate_trace:
             trace_text = f"Recent coordinate trace (x, y) leading to failure: {coordinate_trace}"
-            
+            if len(coordinate_trace) > 0:
+                current_x = coordinate_trace[-1][0]
+
         lessons_text = ""
-        if os.path.exists("memory/lessons_learned.txt"):
-            with open("memory/lessons_learned.txt", "r") as f:
-                lessons_text = "Persisted Lessons Learned (CRITICAL - DO NOT VIOLATE):\n" + f.read()
+        if os.path.exists("memory/semantic_bank.json"):
+            try:
+                bank = load_semantic_bank("memory/semantic_bank.json")
+                relevant_lessons = select_relevant_lessons(bank, current_x, radius=1000, limit=10)
+                if relevant_lessons:
+                    lessons_text = "Relevant Semantic Memory (CRITICAL - DO NOT VIOLATE):\n" + "\n".join(relevant_lessons)
+            except Exception as e:
+                print(f"Error loading semantic bank: {e}")
+
+        skills_text = ""
+        skills_path = "policies/skills.py"
+        if os.path.exists(skills_path):
+            try:
+                with open(skills_path, "r") as f:
+                    skills_content = f.read().strip()
+                    if skills_content and not skills_content.startswith("# This file"):
+                        skills_text = "Available Skills (from `policies.skills`):\n```python\n" + skills_content + "\n```\nYou can import these via `import policies.skills as skills` and call them like `skills.my_func(state)`. Use them to construct `get_action(state)`."
+            except Exception as e:
+                print(f"Error loading skills.py: {e}")
         
         prompt = f"""
 Here is the current code that failed:
@@ -206,6 +366,8 @@ Recent History of Failures:
 {history_text}
 
 {lessons_text}
+
+{skills_text}
 
 Note on Vision Context: The emulator now actively looks at the screen every 5 seconds. The immediate upcoming visual context is injected into `state['vision_context']` (e.g., 'ENEMY', 'CLEAR', 'SPIKES'). You can write logic to check this string!
 
@@ -226,9 +388,10 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         # Clean up markdown if the LLM wrapped it anyway
         print(f"Raw Response from LLM (mutate): {repr(raw_response)}")
         if "```python" in raw_response:
-            raw_response = raw_response.split("```python")[1].split("```")[0].strip()
+            raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
         elif "```" in raw_response:
-            raw_response = raw_response.split("```")[1].strip()
+            parts = raw_response.split("```")
+            raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
             
         return raw_response, reasoning
 
@@ -263,9 +426,9 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         
         print(f"Raw Response from LLM (crossover): {repr(raw_response)}")
         if "```python" in raw_response:
-            raw_response = raw_response.split("```python")[1].split("```")[0].strip()
+            raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
         elif "```" in raw_response:
-            raw_response = raw_response.split("```")[1].strip()
+            parts = raw_response.split("```")
+            raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
             
         return raw_response, reasoning
-

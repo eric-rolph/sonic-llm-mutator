@@ -1,4 +1,4 @@
 - When at X=80, jump to avoid falling into a pit.
+- When at X=280, jump to avoid the fatal obstacle.
 - When at X=287, jump to avoid falling into the pit.
-def get_action(state):
-    return 'RIGHT'
+- When at X=3895, press RIGHT to avoid getting stuck.

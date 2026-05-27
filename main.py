@@ -2,10 +2,11 @@ import os
 import time
 import sys
 import importlib.util
+sys.path.insert(0, os.path.abspath("."))
+
 from core.evaluator import calculate_fitness
 from core.history import EvolutionHistory
 from llm.mutator import MutatorClient
-from emulator.sonic_env import SonicEnvWrapper
 
 def load_policy(filepath):
     """Loads a python script dynamically."""
@@ -14,13 +15,15 @@ def load_policy(filepath):
     spec.loader.exec_module(policy_module)
     return policy_module
 
-def evaluate_policy(env, policy, mutator, max_frames=5000):
+def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True):
     obs = env.reset()
     frames_alive = 0
     max_x = 0
     done = False
     stuck_counter = 0
     last_x = 0
+    failure_reason = None
+    state = {}
     
     current_vision_context = "UNKNOWN"
     
@@ -49,14 +52,19 @@ def evaluate_policy(env, policy, mutator, max_frames=5000):
             future = executor.submit(policy.get_action, state)
             action_string = future.result(timeout=0.5)
         except concurrent.futures.TimeoutError:
-            print("Policy timed out (infinite loop?)")
+            if verbose:
+                print("Policy timed out (infinite loop?)")
             action_string = ""
             done = True
             break
         except Exception as e:
-            print(f"Policy threw exception: {e}")
+            if verbose:
+                print(f"Policy threw exception: {e}")
             action_string = "RIGHT"
-            
+
+        if not isinstance(action_string, str):
+            action_string = "RIGHT"
+
         buttons = ['B', 'A', 'MODE', 'START', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'C', 'Y', 'X', 'Z']
         action = [0] * 12
         for p in action_string.split(','):
@@ -76,12 +84,15 @@ def evaluate_policy(env, policy, mutator, max_frames=5000):
         last_x = current_x
         
         if stuck_counter > 500:
-            print("Sonic got stuck! Terminating run.")
+            if verbose:
+                print("Sonic got stuck! Terminating run.")
             done = True
             failure_reason = "Sonic stopped making forward progress for 8 seconds."
             break
             
-    if frames_alive >= max_frames:
+    if failure_reason is not None:
+        pass
+    elif frames_alive >= max_frames:
         failure_reason = "Timeout reached."
     elif not done:
         failure_reason = "Unknown early termination."
@@ -315,6 +326,13 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
                 print(f"NEW ALL-TIME CHAMPION! {all_time_champion_fitness:.2f} -> {best_candidate_fitness:.2f}")
                 all_time_champion_fitness = best_candidate_fitness
                 
+                # Extract and save skills (Voyager Skill Library feature)
+                print("Extracting new skills from this champion policy...")
+                try:
+                    mutator.extract_and_save_skills(best_candidate_code)
+                except Exception as e:
+                    print(f"Failed to extract skills: {e}")
+
                 # Convert video for new champion
                 champion_mp4 = "artifacts/videos/champion.mp4"
                 if os.path.exists(latest_mp4):
