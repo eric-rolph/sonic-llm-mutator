@@ -68,3 +68,19 @@ To ensure the pipeline can run continuously without manual intervention:
     ```bash
     streamlit run dashboard.py
     ```
+
+## Speedrun-First Evaluation
+
+The current training target is Green Hill Zone Act 1 speedrun performance. Fitness now favors distance and fewer frames, with rings and game score treated as small tie-breakers. A completion bonus is awarded once a policy reaches the Act 1 end-zone threshold.
+
+Use the benchmark CLI to compare policies across the primary speedrun target and broader generalization checks:
+
+```bash
+.\venv38\Scripts\python.exe benchmark_policies.py --max-frames 5000
+```
+
+For a quick emulator smoke test:
+
+```bash
+.\venv38\Scripts\python.exe benchmark_policies.py --max-frames 900 --states GreenHillZone.Act1 --policies policies/champion_policy.py
+```

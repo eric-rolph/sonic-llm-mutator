@@ -1,0 +1,57 @@
+[
+    {
+        "x": 80,
+        "hazard": "Starting pit",
+        "lesson": "When at X=80, jump to avoid falling into a pit."
+    },
+    {
+        "x": 287,
+        "hazard": "Early pit",
+        "lesson": "When X is near 287, jump to avoid falling into the pit."
+    },
+    {
+        "x": 1025,
+        "hazard": "Spikes",
+        "lesson": "When at X=1025, jump to avoid spikes."
+    },
+    {
+        "x": 2165,
+        "hazard": "Pit",
+        "lesson": "When at X=2165, jump to avoid falling."
+    },
+    {
+        "x": 2949,
+        "hazard": "Fatal obstacle",
+        "lesson": "When at X=2949, jump or maintain forward momentum to avoid getting stuck."
+    },
+    {
+        "x": 3061,
+        "hazard": "Vertical stuck loop",
+        "lesson": "When at X=3061, prioritize RIGHT movement to avoid getting stuck in vertical oscillation."
+    },
+    {
+        "x": 3895,
+        "hazard": "Stagnation",
+        "lesson": "When at X=3895, press RIGHT to maintain momentum and avoid fatal stagnation."
+    },
+    {
+        "x": 5500,
+        "hazard": "Spikes",
+        "lesson": "When X is near 5500, jump to avoid spikes."
+    },
+    {
+        "x": 7200,
+        "hazard": "Spikes",
+        "lesson": "When at X=7200, jump to avoid spikes."
+    },
+    {
+        "x": 7869,
+        "hazard": "Fatal obstacle",
+        "lesson": "When at X=7869, jump to avoid the fatal obstacle."
+    },
+    {
+        "x": 9767,
+        "hazard": "Pitfall",
+        "lesson": "When at X=9767, jump or maintain forward momentum to avoid falling into the pit."
+    }
+]

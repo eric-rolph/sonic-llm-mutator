@@ -2,9 +2,14 @@ name: Evaluate Sonic Policy
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
     paths:
-      - 'policies/current_policy.py'
+      - 'benchmark_policies.py'
+      - 'core/**'
+      - 'emulator/**'
+      - 'llm/**'
+      - 'main.py'
+      - 'tests/**'
 
 jobs:
   evaluate:
@@ -16,22 +21,17 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        python-version: '3.8'
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: Set up virtual display (Xvfb)
-      # Required for stable-retro to run headlessly on Ubuntu
+    - name: Run unit tests
       run: |
-        sudo apt-get install xvfb
-        sudo Xvfb :99 -ac &
-        echo "DISPLAY=:99" >> $GITHUB_ENV
+        python -m unittest discover -v
 
-    # In a real scenario, you'd need a secure way to inject the ROM here.
-    # We omit it here since ROMs cannot be distributed.
-    - name: Run CI Simulator
+    - name: Compile sources
       run: |
-        python local_ci.py
+        python -m compileall main.py core emulator llm benchmark_policies.py local_ci.py dashboard.py render_video.py
