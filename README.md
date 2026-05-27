@@ -1,7 +1,7 @@
 # Sonic LLM Mutator
 
 ![Dashboard Screenshot](docs/dashboard.png)
-This project uses a Large Language Model (LLM) as a genetic algorithm mutator to learn how to play Sonic the Hedgehog. The system leverages `stable-retro` as the emulator, decoupled via an MCP server, and employs a local CI/CD pipeline script to iteratively test and evolve the Python script that controls Sonic.
+This project uses a Large Language Model (LLM) as a genetic algorithm mutator to learn how to play Sonic the Hedgehog. The system drives Sonic through a retro emulator backend, exposes game state through an MCP server, and uses a local CI/CD pipeline script to iteratively test and evolve the Python script that controls Sonic.
 
 ## Watch it in Action
 
@@ -15,7 +15,7 @@ This project uses a Large Language Model (LLM) as a genetic algorithm mutator to
 
 ## Architecture
 
-1.  **Emulator MCP Server (`emulator/`)**: Wraps `stable-retro` and exposes Sonic's game state (velocity, coordinates, surrounding tiles) as discrete tools.
+1.  **Emulator MCP Server (`emulator/`)**: Wraps a retro emulator backend and exposes Sonic's game state (velocity, coordinates, surrounding tiles) as discrete tools.
 2.  **LLM Mutator (`llm/`)**: Acts as the genetic mutation engine. It queries the MCP server when Sonic dies to understand the failure context, then rewrites the control policy. It routes heavy visual debugging to a cloud vision model (like OpenRouter or Gemini) and minor tweaks to any local LLM (like Ollama or LM Studio).
 3.  **Core Orchestrator (`core/` & `main.py`)**: Runs the current policy, calculates fitness (penalizing stagnation), and manages the automated evolutionary pipeline.
 4.  **Policies (`policies/`)**: Contains the generated Python scripts that decide the button presses for each frame.
@@ -34,7 +34,7 @@ To maximize efficiency and minimize API costs, the mutator (`llm/mutator.py`) in
 
 To ensure the pipeline can run continuously without manual intervention:
 1.  **Syntax Error Sandboxing**: The dynamic Python code loader is wrapped in error handling. If the LLM generates invalid code (e.g., a SyntaxError), the pipeline catches it, assigns the candidate a fitness score of `0.0`, and continues running seamlessly.
-2.  **Stateful Emulator Recording**: We manually enforce video buffer flushing by calling an extra `env.reset()` before teardown, ensuring that `stable-retro` correctly writes the `.bk2` video files to disk even if the episode is manually terminated early.
+2.  **Stateful Emulator Recording**: We manually enforce video buffer flushing by calling an extra `env.reset()` before teardown, ensuring that the emulator correctly writes the `.bk2` video files to disk even if the episode is manually terminated early.
 3.  **Aggressive Cache Breaking**: Mutator prompts are seeded with a randomized cryptographically secure string to prevent local LLMs from entering endless prompt-caching loops.
 
 ## Setup
@@ -73,6 +73,19 @@ To ensure the pipeline can run continuously without manual intervention:
 
 The current training target is Green Hill Zone Act 1 speedrun performance. Fitness now favors distance and fewer frames, with rings and game score treated as small tie-breakers. A completion bonus is awarded once a policy reaches the Act 1 end-zone threshold.
 
+## Emulator Backends
+
+The runtime supports both the maintained `stable-retro` API and the existing `gym-retro` install. The default backend is `auto`: it tries the modern `stable_retro` import first and falls back to legacy `retro` when stable-retro is not installed.
+
+Use `SONIC_RETRO_BACKEND` or the benchmark CLI flag to force a backend:
+
+```powershell
+$env:SONIC_RETRO_BACKEND="legacy"  # or "stable" / "auto"
+.\venv38\Scripts\python.exe benchmark_policies.py --backend legacy --max-frames 900 --states GreenHillZone.Act1 --policies policies/champion_policy.py
+```
+
+Current native Windows Python 3.8 testing keeps `gym-retro` as the safe fallback because `stable-retro` 1.0.0 does not publish a Windows wheel for this environment. Run `--backend stable` in WSL/Linux or another environment where `pip install stable-retro` succeeds before switching training runs fully to stable-retro.
+
 Use the benchmark CLI to compare policies across the primary speedrun target and broader generalization checks:
 
 ```bash
@@ -82,5 +95,5 @@ Use the benchmark CLI to compare policies across the primary speedrun target and
 For a quick emulator smoke test:
 
 ```bash
-.\venv38\Scripts\python.exe benchmark_policies.py --max-frames 900 --states GreenHillZone.Act1 --policies policies/champion_policy.py
+.\venv38\Scripts\python.exe benchmark_policies.py --backend legacy --max-frames 900 --states GreenHillZone.Act1 --policies policies/champion_policy.py
 ```
