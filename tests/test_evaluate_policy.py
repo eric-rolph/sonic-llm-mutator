@@ -151,6 +151,50 @@ class EvaluatePolicyTests(unittest.TestCase):
         self.assertEqual(policy.calls, 2)
         self.assertEqual(reason, "Timeout reached.")
 
+    def test_trace_cadence_not_skipped_by_misaligned_action_repeat(self):
+        # action_repeat=7 does not divide the 30-frame trace interval, so the
+        # old `frames_alive % 30 == 0` check recorded only the frame-0 entry.
+        # The elapsed-frame cadence must keep sampling throughout the run.
+        states = [
+            {"x_pos": index * 100, "y_pos": 100, "rings": 0, "score": 0}
+            for index in range(60)
+        ]
+        env = FakeEnv(states)
+
+        _, frames, _, _, _, trace, _ = self.evaluate_silently(
+            env,
+            max_frames=210,
+            action_repeat=7,
+        )
+
+        self.assertEqual(frames, 210)
+        self.assertGreaterEqual(len(trace), 3)
+        recorded_frames = [entry["frame"] for entry in trace]
+        self.assertEqual(recorded_frames, sorted(recorded_frames))
+
+    def test_context_screenshots_are_bounded_to_a_small_ring(self):
+        class RecordingShotEnv(FakeEnv):
+            def __init__(self, states):
+                super().__init__(states)
+                self.context_shots = []
+
+            def get_screenshot(self, filepath=None):
+                if filepath is not None:
+                    self.context_shots.append(filepath)
+                    return filepath
+                return "final.png"
+
+        # Long enough for several 300-frame vision polls.
+        states = [{"x_pos": i * 10, "y_pos": 100, "rings": 0, "score": 0} for i in range(1100)]
+        env = RecordingShotEnv(states)
+
+        self.evaluate_silently(env, max_frames=1000)
+
+        self.assertGreater(len(env.context_shots), 3)  # polled several times...
+        self.assertLessEqual(len(set(env.context_shots)), 3)  # ...but onto <=3 files
+        for path in env.context_shots:
+            self.assertRegex(path, r"context_slot[012]\.png$")
+
 
 if __name__ == "__main__":
     unittest.main()
