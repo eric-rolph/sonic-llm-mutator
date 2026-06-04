@@ -60,7 +60,9 @@ class RunResumeTests(unittest.TestCase):
         self.assertGreater(context["working_fitness"], -1)
         self.assertEqual(context["last_screenshot"], "baseline_screenshot.png")
         self.assertIn("stopped making forward progress", context["last_failure_reason"])
-        self.assertEqual(context["last_trace"][-1], (100, 100))
+        self.assertEqual(context["last_trace"][-1]["x"], 100)
+        self.assertEqual(context["last_trace"][-1]["y"], 100)
+        self.assertEqual(context["last_trace"][-1]["action"], "RIGHT")
 
     def test_evaluate_working_baseline_handles_missing_policy(self):
         context = evaluate_working_baseline(

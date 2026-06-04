@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.abspath("."))
 
 from core.evaluator import calculate_fitness
 from core.history import EvolutionHistory
+from core.trace_context import build_screenshot_montage, build_trace_entry
 from llm.mutator import MutatorClient
 
 def load_policy(filepath):
@@ -16,7 +17,7 @@ def load_policy(filepath):
     return policy_module
 
 
-def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbose=True):
+def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbose=True, action_repeat=1):
     context = {
         "working_fitness": -1.0,
         "last_failure_reason": "Initial seed run",
@@ -40,6 +41,7 @@ def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbo
         mutator,
         max_frames=max_frames,
         verbose=verbose,
+        action_repeat=action_repeat,
     )
     if verbose:
         print(f"Baseline Fitness: {fitness:.2f} (Max X: {max_x}, Frames: {frames_alive})")
@@ -60,45 +62,57 @@ def build_policy_load_failure(error):
     return 0.0, 0, 0, reason, None, [], {"load_error": str(error)}
 
 
+def capture_screenshot(env, filepath=None):
+    try:
+        if filepath is not None:
+            return env.get_screenshot(filepath)
+        return env.get_screenshot()
+    except TypeError:
+        return env.get_screenshot()
+
+
 def clear_candidate_recording(record_dir, candidate_idx):
     candidate_bk2_path = os.path.join(record_dir, f"candidate_{candidate_idx}.bk2")
     if os.path.exists(candidate_bk2_path):
         os.remove(candidate_bk2_path)
 
 
-def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True):
+def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_repeat=1):
     obs = env.reset()
     frames_alive = 0
     max_x = 0
     done = False
     stuck_counter = 0
-    last_x = 0
     failure_reason = None
     state = {}
+    completion_x = None
+    action_repeat = max(1, int(action_repeat or 1))
     
     current_vision_context = "UNKNOWN"
     
-    # Store coordinate trace
     trace = []
+    context_screenshots = []
     
     import concurrent.futures
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     
     while not done and frames_alive < max_frames:
         state = env.get_state()
+        state_completion_x = state.get("screen_x_end") or state.get("completion_x")
+        if state_completion_x:
+            completion_x = state_completion_x
         
         # Proactive Vision Polling: every 300 frames (~5 sec)
         if frames_alive % 300 == 0:
-            shot = env.get_screenshot()
+            context_path = f"artifacts/failures/context_{frames_alive:06d}.png"
+            shot = capture_screenshot(env, context_path)
             if shot:
+                context_screenshots.append(shot)
+                context_screenshots = context_screenshots[-3:]
                 current_vision_context = mutator.analyze_environment(shot)
         
         state['vision_context'] = current_vision_context
-        
-        # Record trace every 30 frames (0.5 seconds at 60fps)
-        if frames_alive % 30 == 0:
-            trace.append((state.get('x_pos', 0), state.get('y_pos', 0)))
-        
+
         try:
             future = executor.submit(policy.get_action, state)
             action_string = future.result(timeout=0.5)
@@ -115,6 +129,10 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True):
 
         if not isinstance(action_string, str):
             action_string = "RIGHT"
+        
+        # Record rich trace every 30 frames (0.5 seconds at 60fps).
+        if frames_alive % 30 == 0:
+            trace.append(build_trace_entry(frames_alive, state, action_string))
 
         buttons = ['B', 'A', 'MODE', 'START', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'C', 'Y', 'X', 'Z']
         action = [0] * 12
@@ -122,8 +140,11 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True):
             if p.strip() in buttons:
                 action[buttons.index(p.strip())] = 1
         
-        obs, reward, done, info = env.step(action)
-        frames_alive += 1
+        for _ in range(action_repeat):
+            if done or frames_alive >= max_frames:
+                break
+            obs, reward, done, info = env.step(action)
+            frames_alive += 1
         
         current_x = state.get('x_pos', 0)
         if current_x > max_x:
@@ -131,9 +152,7 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True):
             stuck_counter = 0
         else:
             stuck_counter += 1
-            
-        last_x = current_x
-        
+
         if stuck_counter > 500:
             if verbose:
                 print("Sonic got stuck! Terminating run.")
@@ -152,38 +171,96 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True):
         
     executor.shutdown(wait=False)
     
-    fitness, components = calculate_fitness(max_x, frames_alive, state.get('rings', 0), state.get('score', 0))
-    screenshot_path = env.get_screenshot()
+    if completion_x:
+        fitness, components = calculate_fitness(
+            max_x,
+            frames_alive,
+            state.get('rings', 0),
+            state.get('score', 0),
+            completion_x=completion_x,
+        )
+    else:
+        fitness, components = calculate_fitness(max_x, frames_alive, state.get('rings', 0), state.get('score', 0))
+
+    screenshot_path = capture_screenshot(env)
+    montage_path = build_screenshot_montage(
+        context_screenshots + ([screenshot_path] if screenshot_path else []),
+        "artifacts/failures/latest_context_montage.png",
+    )
+    if montage_path:
+        screenshot_path = montage_path
     
     return fitness, frames_alive, max_x, failure_reason, screenshot_path, trace[-10:], components
 
-def update_pool(code, fitness):
+def policy_action_signature(code):
+    import re
+
+    actions = set()
+    for match in re.finditer(r"return\s+['\"]([^'\"]*)['\"]", code):
+        actions.add(match.group(1).strip() or "NOOP")
+    if not actions:
+        return "dynamic"
+    return "|".join(sorted(actions))
+
+
+def parse_pool_fitness(path):
+    name = os.path.basename(path)
+    if name.startswith("pool_"):
+        name = name[len("pool_"):]
+    if name.endswith(".py"):
+        name = name[:-len(".py")]
+    value = name.split("_", 1)[0]
+    return float(value)
+
+
+def update_pool(code, fitness, pool_dir="policies/pool", max_size=6):
     import glob
-    os.makedirs("policies/pool", exist_ok=True)
-    pool_files = glob.glob("policies/pool/pool_*.py")
-    
-    pool = []
-    for f in pool_files:
-        try:
-            val = float(os.path.basename(f).replace("pool_", "").replace(".py", ""))
-            pool.append((val, f))
-        except:
-            pass
-            
-    new_path = f"policies/pool/pool_{fitness:.2f}.py"
+    import hashlib
+
+    os.makedirs(pool_dir, exist_ok=True)
+    code_hash = hashlib.sha1(code.encode("utf-8")).hexdigest()[:8]
+    new_path = os.path.join(pool_dir, f"pool_{fitness:.2f}_{code_hash}.py")
     with open(new_path, "w") as f:
         f.write(code)
-    pool.append((fitness, new_path))
-    
-    pool.sort(key=lambda x: x[0], reverse=True)
-    while len(pool) > 3:
-        worst_val, worst_file = pool.pop()
+
+    pool = []
+    for path in glob.glob(os.path.join(pool_dir, "pool_*.py")):
         try:
-            os.remove(worst_file)
-        except:
+            with open(path, "r") as f:
+                pool_code = f.read()
+            pool.append(
+                {
+                    "fitness": parse_pool_fitness(path),
+                    "path": path,
+                    "signature": policy_action_signature(pool_code),
+                }
+            )
+        except (OSError, ValueError):
             pass
 
-def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, stagnation_limit=5):
+    species_leaders = {}
+    for entry in sorted(pool, key=lambda item: item["fitness"], reverse=True):
+        species_leaders.setdefault(entry["signature"], entry)
+
+    selected_paths = []
+    for entry in sorted(species_leaders.values(), key=lambda item: item["fitness"], reverse=True):
+        if len(selected_paths) < max_size:
+            selected_paths.append(entry["path"])
+
+    for entry in sorted(pool, key=lambda item: item["fitness"], reverse=True):
+        if len(selected_paths) >= max_size:
+            break
+        if entry["path"] not in selected_paths:
+            selected_paths.append(entry["path"])
+
+    for entry in pool:
+        if entry["path"] not in selected_paths:
+            try:
+                os.remove(entry["path"])
+            except OSError:
+                pass
+
+def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, stagnation_limit=5, action_repeat=1):
     history = EvolutionHistory()
     mutator = MutatorClient()
     
@@ -221,7 +298,7 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             print(f"Failed to load history for fitness: {e}")
             
     stagnation_counter = 0
-    baseline_context = evaluate_working_baseline(env, working_path, mutator, max_frames)
+    baseline_context = evaluate_working_baseline(env, working_path, mutator, max_frames, action_repeat=action_repeat)
     working_fitness = baseline_context["working_fitness"]
     last_failure_reason = baseline_context["last_failure_reason"]
     last_trace = baseline_context["last_trace"]
@@ -326,7 +403,13 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             elif policy is None:
                 fitness, frames_alive, max_x, failure_reason, screenshot_path, trace, components = build_policy_load_failure(load_error)
             else:
-                fitness, frames_alive, max_x, failure_reason, screenshot_path, trace, components = evaluate_policy(env, policy, mutator, max_frames)
+                fitness, frames_alive, max_x, failure_reason, screenshot_path, trace, components = evaluate_policy(
+                    env,
+                    policy,
+                    mutator,
+                    max_frames,
+                    action_repeat=action_repeat,
+                )
                 print(f"Candidate {c+1} Fitness: {fitness:.2f} (Max X: {max_x}, Frames: {frames_alive})")
                 
                 # Flush the bk2 video buffer to disk (stable-retro only flushes on reset)

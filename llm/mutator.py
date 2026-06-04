@@ -1,6 +1,7 @@
 import os
 import base64
 import json
+from core.trace_context import trace_entry_x
 from llm.prompts import SYSTEM_PROMPT
 from openai import OpenAI
 from tenacity import retry, wait_exponential, stop_after_attempt
@@ -338,9 +339,9 @@ Return ONLY valid Python code containing the updated skill library (the existing
         trace_text = ""
         current_x = 0
         if coordinate_trace:
-            trace_text = f"Recent coordinate trace (x, y) leading to failure: {coordinate_trace}"
+            trace_text = f"Recent frame trace leading to failure: {coordinate_trace}"
             if len(coordinate_trace) > 0:
-                current_x = coordinate_trace[-1][0]
+                current_x = trace_entry_x(coordinate_trace[-1])
 
         lessons_text = ""
         if os.path.exists("memory/semantic_bank.json"):
