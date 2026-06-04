@@ -34,8 +34,11 @@ To maximize efficiency and minimize API costs, the mutator (`llm/mutator.py`) in
 
 To ensure the pipeline can run continuously without manual intervention:
 1.  **Syntax Error Sandboxing**: The dynamic Python code loader is wrapped in error handling. If the LLM generates invalid code (e.g., a SyntaxError), the pipeline catches it, assigns the candidate a fitness score of `0.0`, and continues running seamlessly.
-2.  **Stateful Emulator Recording**: We manually enforce video buffer flushing by calling an extra `env.reset()` before teardown, ensuring that the emulator correctly writes the `.bk2` video files to disk even if the episode is manually terminated early.
-3.  **Aggressive Cache Breaking**: Mutator prompts are seeded with a randomized cryptographically secure string to prevent local LLMs from entering endless prompt-caching loops.
+2.  **Runaway-Policy Timeout**: Each `get_action` call runs on a dedicated daemon worker thread (`core/policy_runner.py`) with a hard wall-clock timeout. If an evolved policy contains an infinite loop, the candidate is abandoned and scored as a failure instead of spinning a CPU core forever or hanging the process on exit.
+3.  **Stateful Emulator Recording**: We manually enforce video buffer flushing by calling an extra `env.reset()` before teardown, ensuring that the emulator correctly writes the `.bk2` video files to disk even if the episode is manually terminated early.
+4.  **Aggressive Cache Breaking**: Mutator prompts are seeded with a randomized cryptographically secure string to prevent local LLMs from entering endless prompt-caching loops.
+
+> ⚠️ **Security note:** evolved policies are arbitrary LLM-generated Python that is `exec`'d **in-process** with your full user privileges (`load_policy` in `main.py`). The timeout above bounds runtime, but it does **not** sandbox filesystem or network access. Run the pipeline only in a trusted/isolated environment (e.g. a container or VM), and review generated `policies/` before reusing them elsewhere.
 
 ## Setup
 
@@ -43,8 +46,12 @@ To ensure the pipeline can run continuously without manual intervention:
     ```bash
     uv venv --python 3.8 venv
     .\venv\Scripts\Activate.ps1
-    uv pip install -r requirements.txt
+    uv pip install -r requirements.txt              # core training loop
+    uv pip install -r requirements-dashboard.txt    # optional: Streamlit dashboard
+    uv pip install -r requirements-dev.txt          # optional: run tests + ruff
     ```
+    On Linux/WSL you can use the maintained `stable-retro` backend instead of
+    `gym-retro` (`pip install stable-retro`); the runtime auto-detects it.
 2.  Import the Sonic the Hedgehog ROM:
     ```bash
     python -m retro.import /path/to/your/roms
@@ -68,6 +75,18 @@ To ensure the pipeline can run continuously without manual intervention:
     ```bash
     streamlit run dashboard.py
     ```
+
+## Development
+
+The unit tests stub the emulator, so they run quickly without `gym-retro`/`stable-retro` installed:
+
+```bash
+pip install -r requirements-dev.txt
+python -m unittest discover -s tests
+ruff check .
+```
+
+CI runs the same lint + test steps on Python 3.8 and 3.11 (`.github/workflows/evaluate_policy.yml`).
 
 ## Speedrun-First Evaluation
 
