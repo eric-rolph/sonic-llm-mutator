@@ -1,10 +1,13 @@
-import os
 import base64
 import json
+import mimetypes
+import os
+
+from openai import OpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from core.trace_context import trace_entry_x
 from llm.prompts import SYSTEM_PROMPT
-from openai import OpenAI
-from tenacity import retry, wait_exponential, stop_after_attempt
 
 
 def extract_json_object(text):
@@ -110,11 +113,11 @@ class MutatorClient:
         # Default to Google's OpenAI-compatible endpoint if using Gemini directly
         self.macro_base_url = os.environ.get("MACRO_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
         self.macro_model = os.environ.get("MACRO_MODEL", "gemini-2.5-pro")
-        
+
         # Local/Micro Model Config
         self.micro_base_url = os.environ.get("MICRO_BASE_URL", "http://localhost:1234/v1")
         self.micro_model = os.environ.get("MICRO_MODEL", "local-model")
-        
+
         self.macro_client = OpenAI(api_key=self.macro_api_key, base_url=self.macro_base_url) if self.macro_api_key else None
         self.micro_client = OpenAI(api_key="not-needed", base_url=self.micro_base_url)
 
@@ -125,11 +128,11 @@ def get_action(state):
     # Basic Gen 0 Seed Policy
     # Always run right, jump occasionally
     action = "RIGHT"
-    
+
     # Try to jump if rings are 0 (maybe we hit something)
     if state.get('rings', 1) == 0:
         action += ",B"
-        
+
     return action
 """
         with open(filepath, 'w') as f:
@@ -139,6 +142,17 @@ def get_action(state):
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
 
+    def _image_data_url(self, image_path):
+        """Build a base64 data URL with the MIME type matching the file.
+
+        Screenshots are written as PNG, so hardcoding image/jpeg can be
+        rejected by stricter providers. Derive the type from the extension and
+        fall back to PNG.
+        """
+        mime_type, _ = mimetypes.guess_type(image_path)
+        mime_type = mime_type or "image/png"
+        return f"data:{mime_type};base64,{self._encode_image(image_path)}"
+
     def _call_macro_model(self, prompt, image_path):
         """Calls Cloud LLM for Macro-Mutations (needs vision)."""
         if not image_path:
@@ -147,7 +161,7 @@ def get_action(state):
         if not self.macro_client:
             print("No MACRO_API_KEY found, falling back to local Micro-Mutation model.")
             return self._call_micro_model(prompt)
-            
+
         print(f"Using Cloud API ({self.macro_model}) for Macro-Mutation.")
         try:
             return self._do_macro_call(prompt, image_path)
@@ -161,8 +175,6 @@ def get_action(state):
         reraise=True
     )
     def _do_macro_call(self, prompt, image_path):
-        base64_image = self._encode_image(image_path)
-        
         response = self.macro_client.chat.completions.create(
             model=self.macro_model,
             messages=[
@@ -174,7 +186,7 @@ def get_action(state):
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
+                                "url": self._image_data_url(image_path)
                             }
                         }
                     ]
@@ -184,7 +196,7 @@ def get_action(state):
             max_tokens=2048,
             timeout=60
         )
-        
+
         return response.choices[0].message.content, "Cloud vision analysis completed."
 
 
@@ -215,14 +227,14 @@ def get_action(state):
         )
         content = response.choices[0].message.content or ""
         reasoning_content = getattr(response.choices[0].message, "reasoning_content", "") or ""
-        
+
         if not content.strip():
             if reasoning_content.strip():
                 print("Content was empty, but reasoning_content found. Extracting from reasoning...")
                 content = reasoning_content
             else:
                 raise ValueError("LLM returned an empty string and empty reasoning. Likely a concurrency/queue failure.")
-            
+
         return content, "Local inference completed."
 
     def extract_lesson(self, failure_reason, coordinate_trace):
@@ -254,19 +266,18 @@ Return ONLY a valid JSON object in this exact format:
             json.dump(bank, f, indent=4)
         print(f"Extracted and saved semantic lesson: {lesson_data.get('lesson')}")
 
-    @retry(
-        wait=wait_exponential(multiplier=2, min=2, max=60),
-        stop=stop_after_attempt(3),
-        reraise=True
-    )
     def analyze_environment(self, image_path):
-        """Uses the Cloud VLM to proactively tag the current visual environment."""
+        """Uses the Cloud VLM to proactively tag the current visual environment.
+
+        Failures are swallowed and reported as "UNKNOWN" so the run continues,
+        which is why this is deliberately *not* wrapped in @retry: the except
+        block below would suppress every retry anyway.
+        """
         if not self.macro_client:
             return "UNKNOWN"
-            
-        base64_image = self._encode_image(image_path)
+
         prompt = "Analyze this screenshot from Sonic the Hedgehog. Reply with ONLY ONE or TWO WORDS describing the most immediate upcoming hazard or context directly in front of sonic (e.g. 'CLEAR', 'ENEMY', 'SPIKES', 'LOOP', 'PLATFORM', 'WALL')."
-        
+
         try:
             response = self.macro_client.chat.completions.create(
                 model=self.macro_model,
@@ -279,7 +290,7 @@ Return ONLY a valid JSON object in this exact format:
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                    "url": self._image_data_url(image_path)
                                 }
                             }
                         ]
@@ -363,7 +374,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
                         skills_text = "Available Skills (from `policies.skills`):\n```python\n" + skills_content + "\n```\nYou can import these via `import policies.skills as skills` and call them like `skills.my_func(state)`. Use them to construct `get_action(state)`."
             except Exception as e:
                 print(f"Error loading skills.py: {e}")
-        
+
         prompt = f"""
 Here is the current code that failed:
 ```python
@@ -382,12 +393,12 @@ Recent History of Failures:
 
 Note on Vision Context: The emulator now actively looks at the screen every 5 seconds. The immediate upcoming visual context is injected into `state['vision_context']` (e.g., 'ENEMY', 'CLEAR', 'SPIKES'). You can write logic to check this string!
 
-Analyze the failure and rewrite `get_action(state)`. 
+Analyze the failure and rewrite `get_action(state)`.
 Return ONLY valid Python code, starting with `def get_action(state):`.
 
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
 """
-        
+
         # Decide routing based on failure reason complexity
         if "stuck" in failure_reason.lower() or "timeout" in failure_reason.lower() or not screenshot_path:
             # Likely a physics/logic bug, local model can handle
@@ -395,7 +406,7 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         else:
             # Fatal error, died to enemy/pit. Needs visual analysis.
             raw_response, reasoning = self._call_macro_model(prompt, screenshot_path)
-            
+
         # Clean up markdown if the LLM wrapped it anyway
         print(f"Raw Response from LLM (mutate): {repr(raw_response)}")
         if "```python" in raw_response:
@@ -403,12 +414,12 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         elif "```" in raw_response:
             parts = raw_response.split("```")
             raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
-            
+
         return raw_response, reasoning
 
     def crossover_policies(self, policy_a_code, policy_b_code, recent_history, temperature=0.7):
         history_text = json.dumps(recent_history, indent=2)
-        
+
         prompt = f"""
 We are performing an Evolutionary Algorithm Crossover. We have two highly successful policies (Parent A and Parent B) that each excel in different areas.
 
@@ -431,15 +442,15 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
 
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
 """
-        
+
         raw_response, reasoning = self._call_micro_model(prompt, temperature)
         reasoning = "FunSearch Crossover Offspring"
-        
+
         print(f"Raw Response from LLM (crossover): {repr(raw_response)}")
         if "```python" in raw_response:
             raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
         elif "```" in raw_response:
             parts = raw_response.split("```")
             raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
-            
+
         return raw_response, reasoning
