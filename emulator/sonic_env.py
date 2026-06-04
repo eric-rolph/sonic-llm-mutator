@@ -1,7 +1,7 @@
 import importlib
-import cv2
 import os
 
+import cv2
 
 DEFAULT_GAME = "SonicTheHedgehog-Genesis"
 DEFAULT_STATE = "GreenHillZone.Act1"
@@ -107,18 +107,18 @@ class SonicEnvWrapper:
         """Returns the current relevant RAM values as a dict."""
         current_x = self.info.get('x', 0)
         current_y = self.info.get('y', 0)
-        
+
         # Calculate velocity if previous state exists
         if not hasattr(self, 'last_x'):
             self.last_x = current_x
             self.last_y = current_y
-            
+
         x_vel = current_x - self.last_x
         y_vel = current_y - self.last_y
-        
+
         self.last_x = current_x
         self.last_y = current_y
-        
+
         return {
             "x_pos": current_x,
             "y_pos": current_y,

@@ -1,10 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
-from unittest.mock import patch
 
 import core.trace_context as trace_context
 from core.trace_context import build_screenshot_montage

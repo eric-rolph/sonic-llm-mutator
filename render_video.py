@@ -1,13 +1,14 @@
-import sys
 import subprocess
+import sys
 
 from emulator.sonic_env import make_retro_env, normalize_step_result, resolve_backend_module
+
 
 def bk2_to_mp4(bk2_path, mp4_path):
     retro, _ = resolve_backend_module()
     movie = retro.Movie(bk2_path)
     movie.step()
-    
+
     # We must explicitly load the ROM. retro.make uses the game name from the bk2
     game_name = movie.get_game()
     env = make_retro_env(
@@ -23,7 +24,7 @@ def bk2_to_mp4(bk2_path, mp4_path):
     # Start ffmpeg
     width = env.observation_space.shape[1]
     height = env.observation_space.shape[0]
-    
+
     command = [
         'ffmpeg',
         '-y', # Overwrite
@@ -38,9 +39,9 @@ def bk2_to_mp4(bk2_path, mp4_path):
         '-preset', 'fast',
         mp4_path
     ]
-    
+
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
+
     while movie.step():
         keys = []
         for p in range(movie.players):
@@ -48,7 +49,7 @@ def bk2_to_mp4(bk2_path, mp4_path):
                 keys.append(movie.get_key(i, p))
         obs, rew, done, info = normalize_step_result(env.step(keys))
         process.stdin.write(obs.tobytes())
-        
+
     process.stdin.close()
     process.wait()
     env.close()

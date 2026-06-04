@@ -1,0 +1,20 @@
+# Tooling configuration. This project ships as runnable scripts (see
+# requirements*.txt), so this file intentionally configures tooling only and
+# does not declare a installable package.
+
+[tool.ruff]
+target-version = "py38"
+line-length = 120
+extend-exclude = ["venv", "venv38", "artifacts", "policies"]
+
+[tool.ruff.lint]
+# Conservative, high-signal rule set: pycodestyle errors/warnings, pyflakes,
+# and import sorting. Expand over time as the codebase is cleaned up.
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",  # line length is not enforced strictly
+]
+
+[tool.ruff.lint.per-file-ignores]
+# main.py must mutate sys.path before importing first-party packages.
+"main.py" = ["E402"]

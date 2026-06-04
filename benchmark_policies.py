@@ -6,7 +6,6 @@ from pathlib import Path
 
 from main import evaluate_policy
 
-
 DEFAULT_STATES = [
     "GreenHillZone.Act1",
     "GreenHillZone.Act2",
