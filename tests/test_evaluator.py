@@ -1,6 +1,30 @@
 import unittest
 
-from core.evaluator import calculate_fitness
+from core.evaluator import (
+    COMPLETION_BONUS,
+    DISTANCE_WEIGHT,
+    FITNESS_FORMULA,
+    RING_WEIGHT,
+    SCORE_WEIGHT,
+    SPEED_WEIGHT,
+    calculate_fitness,
+)
+
+
+class FitnessFormulaSyncTests(unittest.TestCase):
+    def test_components_use_the_named_weights(self):
+        # A concrete example whose every term is non-zero, checked against the
+        # weight constants so the formula and the calculation cannot drift apart.
+        _, components = calculate_fitness(x_max=9700, frames_alive=2000, rings=5, score=300)
+        self.assertEqual(components["distance"], 9700 * DISTANCE_WEIGHT)
+        self.assertEqual(components["speed"], (9700 / 2000) * SPEED_WEIGHT)
+        self.assertEqual(components["rings"], 5 * RING_WEIGHT)
+        self.assertEqual(components["score"], 300 * SCORE_WEIGHT)
+        self.assertEqual(components["completion"], COMPLETION_BONUS)
+
+    def test_displayed_formula_mentions_each_weight(self):
+        for weight in (DISTANCE_WEIGHT, SPEED_WEIGHT, RING_WEIGHT, SCORE_WEIGHT, COMPLETION_BONUS):
+            self.assertIn(f"{weight:g}", FITNESS_FORMULA)
 
 
 class FitnessTests(unittest.TestCase):
