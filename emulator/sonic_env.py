@@ -126,6 +126,7 @@ class SonicEnvWrapper:
             "y_velocity": y_vel,
             "screen_x": self.info.get('screen_x', 0),
             "screen_y": self.info.get('screen_y', 0),
+            "screen_x_end": self.info.get('screen_x_end', 0),
             "rings": self.info.get('rings', 0),
             "lives": self.info.get('lives', 3),
             "score": self.info.get('score', 0)

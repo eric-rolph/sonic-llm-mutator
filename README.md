@@ -71,7 +71,11 @@ To ensure the pipeline can run continuously without manual intervention:
 
 ## Speedrun-First Evaluation
 
-The current training target is Green Hill Zone Act 1 speedrun performance. Fitness now favors distance and fewer frames, with rings and game score treated as small tie-breakers. A completion bonus is awarded once a policy reaches the Act 1 end-zone threshold.
+The current training target is Green Hill Zone Act 1 speedrun performance. Fitness now favors distance and fewer frames, with rings and game score treated as small tie-breakers. A completion bonus is awarded once a policy reaches the active state's end-zone threshold, falling back to the Act 1 threshold when the emulator does not expose one.
+
+Mutation prompts receive compact frame traces with position, velocity, rings, vision context, and the action taken. Fatal visual failures also use a small recent-frame montage when screenshots are available, giving the macro model more context than a single final frame.
+
+The policy pool keeps a small amount of action-signature diversity instead of pruning strictly by score, so crossover has access to policies with different controller habits.
 
 ## Emulator Backends
 
@@ -90,6 +94,12 @@ Use the benchmark CLI to compare policies across the primary speedrun target and
 
 ```bash
 .\venv38\Scripts\python.exe benchmark_policies.py --max-frames 5000
+```
+
+Use `--action-repeat` to experiment with frame-skip style evaluation without changing the default training behavior:
+
+```bash
+.\venv38\Scripts\python.exe benchmark_policies.py --max-frames 5000 --action-repeat 3
 ```
 
 For a quick emulator smoke test:

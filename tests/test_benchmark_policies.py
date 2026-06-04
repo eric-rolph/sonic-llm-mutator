@@ -46,6 +46,11 @@ class BenchmarkPoliciesTests(unittest.TestCase):
 
         self.assertEqual(args.backend, "stable")
 
+    def test_parse_args_accepts_action_repeat(self):
+        args = benchmark_policies.parse_args(["--action-repeat", "3"])
+
+        self.assertEqual(args.action_repeat, 3)
+
     def test_run_benchmark_reports_backend_failures_as_rows(self):
         with patch.object(
             benchmark_policies,

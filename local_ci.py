@@ -1,5 +1,6 @@
 import subprocess
 import os
+import sys
 
 def run_local_ci():
     """
@@ -14,25 +15,24 @@ def run_local_ci():
         print("Error: No proposed policy found.")
         return False
         
-    print(f"Evaluating proposed policy: {policy_path}")
+    print(f"Checking proposed policy exists: {policy_path}")
     
-    # We run main.py in a single generation mode to test it
-    # We could modify main.py to take arguments, but for the simulator,
-    # we'll just execute it and let it run one cycle if it's configured for it.
-    
-    # A robust CI would compare the fitness of the new policy against the main branch.
-    # Here we just run the execution loop.
+    # A robust CI would also compare candidate fitness against the main branch.
+    # The local smoke check stays bounded and dependency-light by running tests.
     try:
-        # Run main.py as a subprocess
         env = os.environ.copy()
-        result = subprocess.run(["python", "main.py"], env=env, capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
         
         print("--- CI Output ---")
         print(result.stdout)
         
         if result.returncode == 0:
             print("=== Local CI Pipeline SUCCESS ===")
-            print("Policy merged to main branch.")
             return True
         else:
             print("=== Local CI Pipeline FAILED ===")
@@ -42,5 +42,9 @@ def run_local_ci():
         print(f"CI Execution Error: {e}")
         return False
 
+def main():
+    return 0 if run_local_ci() else 1
+
+
 if __name__ == "__main__":
-    run_local_ci()
+    raise SystemExit(main())

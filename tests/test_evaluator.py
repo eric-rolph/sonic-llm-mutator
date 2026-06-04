@@ -71,6 +71,26 @@ class FitnessTests(unittest.TestCase):
         self.assertGreater(complete_components["completion"], 0)
         self.assertGreater(complete, 9700 * 2)
 
+    def test_completion_threshold_can_be_state_specific(self):
+        _, incomplete_components = calculate_fitness(
+            x_max=499,
+            frames_alive=300,
+            rings=0,
+            score=0,
+            completion_x=500,
+        )
+        complete, complete_components = calculate_fitness(
+            x_max=500,
+            frames_alive=300,
+            rings=0,
+            score=0,
+            completion_x=500,
+        )
+
+        self.assertEqual(incomplete_components["completion"], 0)
+        self.assertGreater(complete_components["completion"], 0)
+        self.assertGreater(complete, 500 * 2)
+
 
 if __name__ == "__main__":
     unittest.main()

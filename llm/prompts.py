@@ -1,3 +1,19 @@
+RECOMMENDED_ACTIONS = [
+    "RIGHT",
+    "RIGHT,B",
+    "RIGHT,DOWN",
+    "RIGHT,UP,B",
+    "B",
+    "DOWN,B",
+    "LEFT",
+    "LEFT,B",
+    "DOWN",
+    "",
+]
+
+
+_RECOMMENDED_ACTIONS_TEXT = ", ".join(repr(action) for action in RECOMMENDED_ACTIONS)
+
 SYSTEM_PROMPT = """You are an advanced AI acting as a genetic algorithm mutation engine.
 Your goal is to learn how to play Sonic the Hedgehog by evolving a pure Python policy script.
 
@@ -10,6 +26,8 @@ You will be provided with:
 Your output must be the FULL, UPDATED Python code for the policy.
 The policy script MUST contain a function called `get_action(state)` that returns a comma-separated string of button presses.
 Valid buttons: B, A, MODE, START, UP, DOWN, LEFT, RIGHT, C, Y, X, Z
+Recommended macro-actions: __RECOMMENDED_ACTIONS__
+Prefer these macro-actions unless the failure context clearly requires a different valid button combination.
 
 Sonic relies on momentum. Do not just write static positional checks like `if x == 100: jump()`.
 Instead, use physics-aware logic like `if state['x_velocity'] < 2.0 and obstacle_ahead: jump()`.
@@ -26,6 +44,6 @@ state = {
     "lives": 3,
     "score": 100
 }
-"""
+""".replace("__RECOMMENDED_ACTIONS__", _RECOMMENDED_ACTIONS_TEXT)
 
 REASONING_PROMPT = """Before outputting the code, briefly explain what you are changing and why, based on the screenshot and failure reason. Keep it under 3 sentences."""

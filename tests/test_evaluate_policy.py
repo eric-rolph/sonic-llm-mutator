@@ -6,7 +6,11 @@ from main import evaluate_policy
 
 
 class StaticPolicy:
+    def __init__(self):
+        self.calls = 0
+
     def get_action(self, state):
+        self.calls += 1
         return "RIGHT"
 
 
@@ -44,13 +48,14 @@ class FakeEnv:
 
 
 class EvaluatePolicyTests(unittest.TestCase):
-    def evaluate_silently(self, env, max_frames):
+    def evaluate_silently(self, env, max_frames, policy=None, **kwargs):
         return evaluate_policy(
             env,
-            StaticPolicy(),
+            policy or StaticPolicy(),
             NoVisionMutator(),
             max_frames=max_frames,
             verbose=False,
+            **kwargs,
         )
 
     def test_preserves_stuck_failure_reason(self):
@@ -100,6 +105,51 @@ class EvaluatePolicyTests(unittest.TestCase):
             )
 
         self.assertEqual(output.getvalue(), "")
+
+    def test_trace_entries_include_motion_action_and_vision_context(self):
+        states = [
+            {
+                "x_pos": index,
+                "y_pos": 100 + index,
+                "x_velocity": 1,
+                "y_velocity": 1,
+                "rings": 3,
+                "score": 10,
+                "vision_context": "CLEAR",
+            }
+            for index in range(40)
+        ]
+        env = FakeEnv(states)
+
+        _, _, _, _, _, trace, _ = self.evaluate_silently(env, max_frames=31)
+
+        self.assertGreaterEqual(len(trace), 2)
+        self.assertIsInstance(trace[-1], dict)
+        self.assertEqual(trace[-1]["x"], 30)
+        self.assertEqual(trace[-1]["y"], 130)
+        self.assertEqual(trace[-1]["action"], "RIGHT")
+        self.assertEqual(trace[-1]["vision_context"], "UNKNOWN")
+        self.assertIn("x_velocity", trace[-1])
+        self.assertIn("frame", trace[-1])
+
+    def test_action_repeat_reuses_policy_action_for_multiple_frames(self):
+        states = [
+            {"x_pos": index, "y_pos": 100, "rings": 0, "score": 0}
+            for index in range(20)
+        ]
+        env = FakeEnv(states)
+        policy = StaticPolicy()
+
+        _, frames, _, reason, _, _, _ = self.evaluate_silently(
+            env,
+            max_frames=5,
+            policy=policy,
+            action_repeat=3,
+        )
+
+        self.assertEqual(frames, 5)
+        self.assertEqual(policy.calls, 2)
+        self.assertEqual(reason, "Timeout reached.")
 
 
 if __name__ == "__main__":

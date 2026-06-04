@@ -58,7 +58,7 @@ def load_policy(policy_path):
     return module
 
 
-def evaluate_policy_on_state(policy_path, state, max_frames, backend="auto"):
+def evaluate_policy_on_state(policy_path, state, max_frames, backend="auto", action_repeat=1):
     from emulator.sonic_env import SonicEnvWrapper
 
     policy = load_policy(policy_path)
@@ -70,6 +70,7 @@ def evaluate_policy_on_state(policy_path, state, max_frames, backend="auto"):
             NoVisionMutator(),
             max_frames=max_frames,
             verbose=False,
+            action_repeat=action_repeat,
         )
     finally:
         env.close()
@@ -87,7 +88,7 @@ def evaluate_policy_on_state(policy_path, state, max_frames, backend="auto"):
     }
 
 
-def run_benchmark(policy_paths=None, states=None, max_frames=5000, backend="auto"):
+def run_benchmark(policy_paths=None, states=None, max_frames=5000, backend="auto", action_repeat=1):
     selected_policies = policy_paths or DEFAULT_POLICIES
     selected_states = states or DEFAULT_STATES
     rows = []
@@ -98,7 +99,7 @@ def run_benchmark(policy_paths=None, states=None, max_frames=5000, backend="auto
                 rows.append(failure_row(state, backend, policy_path, f"Policy file not found: {policy_path}"))
                 continue
             try:
-                rows.append(evaluate_policy_on_state(policy_path, state, max_frames, backend=backend))
+                rows.append(evaluate_policy_on_state(policy_path, state, max_frames, backend=backend, action_repeat=action_repeat))
             except Exception as e:
                 rows.append(failure_row(state, backend, policy_path, f"Benchmark failed: {e}"))
 
@@ -140,13 +141,14 @@ def parse_args(argv=None):
     parser.add_argument("--policies", nargs="+", default=DEFAULT_POLICIES)
     parser.add_argument("--max-frames", type=int, default=5000)
     parser.add_argument("--backend", choices=["auto", "stable", "legacy"], default="auto")
+    parser.add_argument("--action-repeat", type=int, default=1)
     parser.add_argument("--json", action="store_true", help="Emit raw JSON instead of a table.")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    rows = run_benchmark(args.policies, args.states, args.max_frames, backend=args.backend)
+    rows = run_benchmark(args.policies, args.states, args.max_frames, backend=args.backend, action_repeat=args.action_repeat)
     if args.json:
         print(json.dumps(rows, indent=2))
     else:
