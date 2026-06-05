@@ -129,7 +129,12 @@ class SonicEnvWrapper:
             "screen_x_end": self.info.get('screen_x_end', 0),
             "rings": self.info.get('rings', 0),
             "lives": self.info.get('lives', 3),
-            "score": self.info.get('score', 0)
+            "score": self.info.get('score', 0),
+            # Level identity, so the policy can branch per zone/act and the
+            # runner can detect when a level has been cleared.
+            "zone": self.info.get('zone', 0),
+            "act": self.info.get('act', 0),
+            "level_end_bonus": self.info.get('level_end_bonus', 0),
         }
 
     def close(self):
