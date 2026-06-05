@@ -2,6 +2,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 
+from core.evaluator import LEVEL_CLEARED_BONUS
 from main import evaluate_policy
 
 
@@ -194,6 +195,21 @@ class EvaluatePolicyTests(unittest.TestCase):
         self.assertLessEqual(len(set(env.context_shots)), 3)  # ...but onto <=3 files
         for path in env.context_shots:
             self.assertRegex(path, r"context_slot[012]\.png$")
+
+    def test_level_transition_counts_clear_and_resets_progress(self):
+        # Act 0: x climbs to 1000. Then (zone, act) flips and x resets -- the old
+        # global-max stuck detector would have killed the run here.
+        act0 = [{"x_pos": (i + 1) * 100, "zone": 0, "act": 0, "rings": 0, "score": 0} for i in range(10)]
+        act1 = [{"x_pos": (i + 1) * 50, "zone": 0, "act": 1, "rings": 0, "score": 0} for i in range(10)]
+        env = FakeEnv(act0 + act1)
+
+        _, frames, max_x, reason, _, _, components = self.evaluate_silently(env, max_frames=20)
+
+        self.assertEqual(frames, 20)
+        self.assertEqual(reason, "Timeout reached.")  # not "stopped making forward progress"
+        self.assertEqual(components["levels_cleared"], 1)
+        self.assertEqual(components["levels"], LEVEL_CLEARED_BONUS)
+        self.assertEqual(max_x, 500)  # furthest in the *current* act, not the 1000 from act 0
 
 
 if __name__ == "__main__":

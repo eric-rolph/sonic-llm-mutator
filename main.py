@@ -25,6 +25,11 @@ from llm.mutator import MutatorClient
 VISION_INTERVAL = 300   # proactive cloud-vision tagging (~5s at 60fps)
 TRACE_INTERVAL = 30     # rich trace entries (~0.5s at 60fps)
 CONTEXT_SCREENSHOT_SLOTS = 3  # bound on-disk context shots to a small ring
+# After an act transition the emulator keeps reporting the previous act's x for
+# a few frames before it resets to the new act's start. Re-baseline max_x to the
+# live x (and suspend stuck-detection) for this many frames so the stale value
+# is not treated as current-act progress.
+LEVEL_SETTLE_FRAMES = 150
 
 
 def load_policy(filepath):
@@ -106,6 +111,14 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
     completion_x = None
     action_repeat = max(1, int(action_repeat or 1))
 
+    # Continuous play-through bookkeeping. max_x is the furthest point in the
+    # *current* act; cumulative_distance banks the distance of acts already
+    # cleared, and levels_cleared counts how many acts were beaten this episode.
+    levels_cleared = 0
+    cumulative_distance = 0
+    prev_zone_act = None
+    settle_frames_left = 0
+
     current_vision_context = "UNKNOWN"
 
     trace = []
@@ -129,6 +142,22 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
             state_completion_x = state.get("screen_x_end") or state.get("completion_x")
             if state_completion_x:
                 completion_x = state_completion_x
+
+            # Detect a level transition: when (zone, act) changes the game has
+            # advanced to the next act, so bank the cleared level's distance and
+            # reset per-level progress (otherwise the x-reset to ~0 would look
+            # like Sonic getting stuck).
+            zone_act = (state.get("zone"), state.get("act"))
+            if prev_zone_act is not None and zone_act != prev_zone_act:
+                # max_x here is the cleared act's true furthest point; bank it.
+                cumulative_distance += max_x
+                levels_cleared += 1
+                stuck_counter = 0
+                # Re-baseline over the next few frames (x is still mid-reset).
+                settle_frames_left = LEVEL_SETTLE_FRAMES
+                if verbose:
+                    print(f"Level cleared! Entering zone {zone_act[0]} act {zone_act[1]} (total cleared: {levels_cleared})")
+            prev_zone_act = zone_act
 
             # Pick up the most recent finished vision result without blocking.
             if vision_future is not None and vision_future.done():
@@ -182,8 +211,18 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
                 frames_alive += 1
 
             current_x = state.get('x_pos', 0)
-            if current_x > max_x:
+            if settle_frames_left > 0:
+                # Just transitioned to a new act; follow the live x down to its
+                # reset value and don't count stuck while it settles.
+                settle_frames_left -= 1
                 max_x = current_x
+                stuck_counter = 0
+            elif current_x > max_x:
+                max_x = current_x
+                stuck_counter = 0
+            elif state.get('level_end_bonus'):
+                # End-of-level tally is playing (Sonic ran off-screen); the x
+                # plateau here is success, not being stuck.
                 stuck_counter = 0
             else:
                 stuck_counter += 1
@@ -192,7 +231,10 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
                 if verbose:
                     print("Sonic got stuck! Terminating run.")
                 done = True
-                failure_reason = "Sonic stopped making forward progress for 8 seconds."
+                level_suffix = ""
+                if zone_act and zone_act[0] is not None:
+                    level_suffix = f" (zone {zone_act[0]} act {zone_act[1]})"
+                failure_reason = "Sonic stopped making forward progress for 8 seconds." + level_suffix
                 break
     finally:
         runner.close()
@@ -214,9 +256,18 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
             state.get('rings', 0),
             state.get('score', 0),
             completion_x=completion_x,
+            levels_cleared=levels_cleared,
+            cumulative_distance=cumulative_distance,
         )
     else:
-        fitness, components = calculate_fitness(max_x, frames_alive, state.get('rings', 0), state.get('score', 0))
+        fitness, components = calculate_fitness(
+            max_x,
+            frames_alive,
+            state.get('rings', 0),
+            state.get('score', 0),
+            levels_cleared=levels_cleared,
+            cumulative_distance=cumulative_distance,
+        )
 
     screenshot_path = capture_screenshot(env)
     montage_path = build_screenshot_montage(
@@ -360,7 +411,10 @@ def generate_candidates(
     return candidates_code
 
 
-def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, stagnation_limit=5, action_repeat=1):
+def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, stagnation_limit=5, action_repeat=1):
+    # max_frames now spans several acts (~3-4k frames each) so a strong policy
+    # can play through. Weak candidates still terminate early via stuck-detection,
+    # so the larger budget only costs wall-clock for genuinely good runs.
     history = EvolutionHistory()
     mutator = MutatorClient()
 
