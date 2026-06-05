@@ -30,6 +30,10 @@ CONTEXT_SCREENSHOT_SLOTS = 3  # bound on-disk context shots to a small ring
 # live x (and suspend stuck-detection) for this many frames so the stale value
 # is not treated as current-act progress.
 LEVEL_SETTLE_FRAMES = 150
+# Terminate a run once Sonic makes no forward progress for this many frames
+# (~8s at 60fps). Counted in frames (not loop iterations) so the threshold is
+# unaffected by action_repeat.
+STUCK_FRAME_LIMIT = 500
 
 
 def load_policy(filepath):
@@ -188,6 +192,9 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
                     print("Policy timed out (infinite loop?)")
                 action_string = ""
                 done = True
+                # "timeout" keyword routes this to the local code model (it is a
+                # code bug, not a visual hazard) and triggers lesson extraction.
+                failure_reason = "Policy code timeout (likely an infinite loop in get_action)."
                 break
             except Exception as e:
                 if verbose:
@@ -225,16 +232,18 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
                 # plateau here is success, not being stuck.
                 stuck_counter = 0
             else:
-                stuck_counter += 1
+                stuck_counter += action_repeat
 
-            if stuck_counter > 500:
+            if stuck_counter > STUCK_FRAME_LIMIT:
                 if verbose:
                     print("Sonic got stuck! Terminating run.")
                 done = True
                 level_suffix = ""
                 if zone_act and zone_act[0] is not None:
                     level_suffix = f" (zone {zone_act[0]} act {zone_act[1]})"
-                failure_reason = "Sonic stopped making forward progress for 8 seconds." + level_suffix
+                # "stuck" keyword routes this to the local code model (a physics/
+                # logic bug) and triggers lesson extraction.
+                failure_reason = "Sonic got stuck: stopped making forward progress for 8 seconds." + level_suffix
                 break
     finally:
         runner.close()
