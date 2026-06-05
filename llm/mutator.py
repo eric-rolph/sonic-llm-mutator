@@ -2,6 +2,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -106,6 +107,37 @@ def normalize_vision_context(content):
     return normalized or "UNKNOWN"
 
 
+def message_text(message):
+    """Return a model message's text, falling back to ``reasoning_content``.
+
+    Reasoning models (e.g. gemma, qwen3) routinely leave ``content`` empty and
+    place their output in ``reasoning_content``. The micro path already handled
+    this; this helper lets the macro/vision paths do the same.
+    """
+    content = (getattr(message, "content", "") or "").strip()
+    if content:
+        return content
+    return (getattr(message, "reasoning_content", "") or "").strip()
+
+
+_VISION_STOPWORDS = {
+    "OR", "AND", "THE", "A", "AN", "IS", "ARE", "WITH", "OF", "TO", "IN", "ON",
+    "NO", "SONIC", "AHEAD", "IMMEDIATE", "CONTEXT", "HAZARD",
+}
+
+
+def concise_vision_label(text, max_words=2):
+    """Collapse a (possibly verbose, reasoning-style) reply to a short tag.
+
+    Reasoning models often conclude with the answer, so we keep the trailing
+    meaningful words and drop connector/filler tokens.
+    """
+    words = re.findall(r"[A-Za-z]+", text or "")
+    meaningful = [w for w in words if w.upper() not in _VISION_STOPWORDS]
+    picks = (meaningful or words)[-max_words:]
+    return normalize_vision_context(" ".join(picks)) if picks else "UNKNOWN"
+
+
 class MutatorClient:
     def __init__(self):
         # Cloud/Macro Model Config
@@ -197,7 +229,10 @@ def get_action(state):
             timeout=60
         )
 
-        return response.choices[0].message.content, "Cloud vision analysis completed."
+        text = message_text(response.choices[0].message)
+        if not text:
+            raise ValueError("Macro model returned empty content and reasoning.")
+        return text, "Cloud vision analysis completed."
 
 
     def _call_micro_model(self, prompt, temperature=0.7):
@@ -225,15 +260,9 @@ def get_action(state):
             max_tokens=8192,
             timeout=300
         )
-        content = response.choices[0].message.content or ""
-        reasoning_content = getattr(response.choices[0].message, "reasoning_content", "") or ""
-
-        if not content.strip():
-            if reasoning_content.strip():
-                print("Content was empty, but reasoning_content found. Extracting from reasoning...")
-                content = reasoning_content
-            else:
-                raise ValueError("LLM returned an empty string and empty reasoning. Likely a concurrency/queue failure.")
+        content = message_text(response.choices[0].message)
+        if not content:
+            raise ValueError("LLM returned an empty string and empty reasoning. Likely a concurrency/queue failure.")
 
         return content, "Local inference completed."
 
@@ -297,10 +326,10 @@ Return ONLY a valid JSON object in this exact format:
                     }
                 ],
                 temperature=0.3,
-                max_tokens=10,
-                timeout=20
+                max_tokens=256,  # reasoning models need room to finish before answering
+                timeout=30
             )
-            return normalize_vision_context(response.choices[0].message.content)
+            return concise_vision_label(message_text(response.choices[0].message))
         except Exception as e:
             print(f"Proactive vision analysis failed: {e}")
             return "UNKNOWN"

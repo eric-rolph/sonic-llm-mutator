@@ -4,12 +4,38 @@ from io import StringIO
 
 from llm.mutator import (
     MutatorClient,
+    concise_vision_label,
     dedupe_lessons,
     extract_json_object,
+    message_text,
     normalize_lesson,
     normalize_vision_context,
     select_relevant_lessons,
 )
+
+
+class _Msg:
+    def __init__(self, content=None, reasoning_content=None):
+        self.content = content
+        self.reasoning_content = reasoning_content
+
+
+class ReasoningModelExtractionTests(unittest.TestCase):
+    def test_message_text_prefers_content(self):
+        self.assertEqual(message_text(_Msg(content="hello", reasoning_content="ignored")), "hello")
+
+    def test_message_text_falls_back_to_reasoning_when_content_empty(self):
+        # Reasoning models (gemma, qwen3) leave content empty and fill reasoning.
+        self.assertEqual(message_text(_Msg(content="", reasoning_content="thought")), "thought")
+        self.assertEqual(message_text(_Msg(content=None, reasoning_content="r")), "r")
+
+    def test_message_text_empty_when_both_missing(self):
+        self.assertEqual(message_text(_Msg(content=None, reasoning_content=None)), "")
+
+    def test_concise_vision_label_drops_connectors_and_uppercases(self):
+        self.assertEqual(concise_vision_label("...spikes or enemies"), "SPIKES ENEMIES")
+        self.assertEqual(concise_vision_label("The context is clear"), "CLEAR")
+        self.assertEqual(concise_vision_label(""), "UNKNOWN")
 
 
 class MutatorMemoryTests(unittest.TestCase):
