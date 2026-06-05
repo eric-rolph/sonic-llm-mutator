@@ -46,6 +46,29 @@ This project sits firmly in the **code-evolver** camp, so the paradigm itself is
 
 The payoff of evolving code rather than playing in the loop: the resulting policy is **fast, ~zero-marginal-cost at runtime, deterministic, and human-readable Python** you can diff to see exactly what it learned — versus an in-loop agent that re-pays latency and API cost on every frame.
 
+### Efficiency: evolved policy vs. in-loop VLM (measured)
+
+Measured on this repo's champion clearing Green Hill Act 1 (legacy gym-retro backend), versus a *projected* in-loop VLM agent over the same frames:
+
+| scenario | API calls / run | $ / run | wall-clock / run | frames / $ |
+|---|---|---|---|---|
+| **evolved policy (runtime)** | **0** | **$0** | **~1 s** | **∞** |
+| in-loop VLM (1 call / 12 frames) | 274 | $0.82 | ~7 min | ~4,000 |
+| in-loop VLM (1 call / 4 frames) | 822 | $2.47 | ~20 min | ~1,300 |
+
+The evolved `get_action` clears Act 1 in ~3,300 frames of local compute (~1 s headless on this machine; ~55 s even at real-time 60 fps) with **zero** API calls. An in-loop agent re-pays one model call per decision **every run**: at a coarse one-decision-per-12-frames cadence with $0.003/call + 1.5 s latency, that is ~$0.82 and ~7 minutes per Act-1 run — and it scales linearly with every run thereafter. The evolved side is bounded by emulator speed; the in-loop side is bounded by API latency.
+
+Because training here is **local-first** (mutations run on a free local LLM), the one-time evolutionary cost is ≈ $0, so the evolved policy is cheaper from the very first run.
+
+Reproduce or plug in your provider's numbers (no paid API is called — it is an explicit cost model in [`core/efficiency.py`](core/efficiency.py)):
+
+```bash
+python efficiency_report.py --measure                          # measure the evolved side live
+python efficiency_report.py --usd-per-call 0.005 --latency 2.0  # project in-loop at your prices
+```
+
+*Stated honestly:* an in-loop VLM needs **no training** and generalizes zero-shot to new games — that is its real advantage. The code-evolver trades up-front, game-specific evolution for a runtime that is fast, deterministic, inspectable, and ~free to re-run. The in-loop figures above are a transparent projection; `--usd-per-call`, `--latency`, and `--frames-per-decision` are all configurable.
+
 ## Resilience Features
 
 To ensure the pipeline can run continuously without manual intervention:

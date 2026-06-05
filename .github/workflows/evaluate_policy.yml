@@ -47,4 +47,4 @@ jobs:
 
     - name: Compile sources
       run: |
-        python -m compileall main.py core emulator llm benchmark_policies.py local_ci.py dashboard.py render_video.py
+        python -m compileall main.py core emulator llm benchmark_policies.py local_ci.py dashboard.py render_video.py efficiency_report.py
