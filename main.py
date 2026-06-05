@@ -134,10 +134,19 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
     last_vision_frame = -VISION_INTERVAL
     last_trace_frame = -TRACE_INTERVAL
 
+    # Proactive vision polling tags the upcoming hazard every VISION_INTERVAL
+    # frames. It is a slow model call, so it runs single-flight on a background
+    # thread. Disable it (SONIC_PROACTIVE_VISION=0) when the vision model shares
+    # an endpoint with the code model: the polls would compete for the same local
+    # model and rarely finish before a fast headless eval ends. The death-frame
+    # analysis on a fatal failure is unaffected either way.
+    proactive_vision = os.environ.get("SONIC_PROACTIVE_VISION", "1") != "0"
+
     runner = PolicyRunner(policy)
-    # Cloud vision is a slow network call; run it single-flight on a background
-    # thread so it never stalls emulator stepping.
-    vision_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision")
+    vision_executor = (
+        concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision")
+        if proactive_vision else None
+    )
     vision_future = None
 
     try:
@@ -163,25 +172,26 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
                     print(f"Level cleared! Entering zone {zone_act[0]} act {zone_act[1]} (total cleared: {levels_cleared})")
             prev_zone_act = zone_act
 
-            # Pick up the most recent finished vision result without blocking.
-            if vision_future is not None and vision_future.done():
-                try:
-                    current_vision_context = vision_future.result()
-                except Exception:
-                    current_vision_context = "UNKNOWN"
-                vision_future = None
+            if proactive_vision:
+                # Pick up the most recent finished vision result without blocking.
+                if vision_future is not None and vision_future.done():
+                    try:
+                        current_vision_context = vision_future.result()
+                    except Exception:
+                        current_vision_context = "UNKNOWN"
+                    vision_future = None
 
-            # Kick off the next proactive vision poll in the background.
-            if frames_alive - last_vision_frame >= VISION_INTERVAL and vision_future is None:
-                last_vision_frame = frames_alive
-                slot = vision_poll_count % CONTEXT_SCREENSHOT_SLOTS
-                vision_poll_count += 1
-                context_path = f"artifacts/failures/context_slot{slot}.png"
-                shot = capture_screenshot(env, context_path)
-                if shot:
-                    context_screenshots.append(shot)
-                    context_screenshots = context_screenshots[-CONTEXT_SCREENSHOT_SLOTS:]
-                    vision_future = vision_executor.submit(mutator.analyze_environment, shot)
+                # Kick off the next proactive vision poll in the background.
+                if frames_alive - last_vision_frame >= VISION_INTERVAL and vision_future is None:
+                    last_vision_frame = frames_alive
+                    slot = vision_poll_count % CONTEXT_SCREENSHOT_SLOTS
+                    vision_poll_count += 1
+                    context_path = f"artifacts/failures/context_slot{slot}.png"
+                    shot = capture_screenshot(env, context_path)
+                    if shot:
+                        context_screenshots.append(shot)
+                        context_screenshots = context_screenshots[-CONTEXT_SCREENSHOT_SLOTS:]
+                        vision_future = vision_executor.submit(mutator.analyze_environment, shot)
 
             state['vision_context'] = current_vision_context
 
@@ -247,7 +257,8 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
                 break
     finally:
         runner.close()
-        vision_executor.shutdown(wait=False)
+        if vision_executor is not None:
+            vision_executor.shutdown(wait=False)
 
     if failure_reason is not None:
         pass

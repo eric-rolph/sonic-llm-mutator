@@ -106,6 +106,14 @@ To ensure the pipeline can run continuously without manual intervention:
     $env:MICRO_BASE_URL="http://localhost:11434/v1"    # Ollama default. Use 1234 for LM Studio.
     $env:MICRO_MODEL="qwen2.5-coder"                   # Your locally loaded model
     ```
+    **Fully local (no cloud key):** point the macro tier at the same local server
+    if your model has vision (e.g. a Gemma/Qwen-VL in LM Studio), and disable the
+    proactive per-frame vision polling so it doesn't compete with code mutations
+    on the one shared model — the death-frame analysis still runs on real failures:
+    ```bash
+    $env:MACRO_API_KEY="lm-studio"; $env:MACRO_BASE_URL="http://localhost:1234/v1"; $env:MACRO_MODEL="your-vision-model"
+    $env:SONIC_PROACTIVE_VISION="0"   # skip proactive polling on a shared local endpoint
+    ```
 4.  Run the evolutionary pipeline:
     ```bash
     python main.py

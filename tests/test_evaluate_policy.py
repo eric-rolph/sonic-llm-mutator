@@ -1,6 +1,8 @@
+import os
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from unittest import mock
 
 from core.evaluator import LEVEL_CLEARED_BONUS
 from main import evaluate_policy
@@ -195,6 +197,24 @@ class EvaluatePolicyTests(unittest.TestCase):
         self.assertLessEqual(len(set(env.context_shots)), 3)  # ...but onto <=3 files
         for path in env.context_shots:
             self.assertRegex(path, r"context_slot[012]\.png$")
+
+    def test_proactive_vision_disabled_by_env_var(self):
+        class CountingVisionMutator:
+            def __init__(self):
+                self.calls = 0
+
+            def analyze_environment(self, screenshot_path):
+                self.calls += 1
+                return "CLEAR"
+
+        states = [{"x_pos": i, "y_pos": 100, "rings": 0, "score": 0} for i in range(400)]
+        env = FakeEnv(states)
+        mutator = CountingVisionMutator()
+
+        with mock.patch.dict(os.environ, {"SONIC_PROACTIVE_VISION": "0"}):
+            evaluate_policy(env, StaticPolicy(), mutator, max_frames=350, verbose=False)
+
+        self.assertEqual(mutator.calls, 0)  # no proactive polling when disabled
 
     def test_level_transition_counts_clear_and_resets_progress(self):
         # Act 0: x climbs to 1000. Then (zone, act) flips and x resets -- the old
