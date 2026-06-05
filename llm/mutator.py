@@ -428,12 +428,17 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
 """
 
-        # Decide routing based on failure reason complexity
-        if "stuck" in failure_reason.lower() or "timeout" in failure_reason.lower() or not screenshot_path:
-            # Likely a physics/logic bug, local model can handle
+        # Route by failure type. A pure code fault (an infinite loop caught as a
+        # timeout), or having no frame to look at, goes to the local code model.
+        # Everything else -- Sonic stuck against level geometry, or killed by a
+        # hazard -- is a *visual* problem: the model needs to SEE the frame to
+        # understand what is blocking or killing it, so it goes to the vision
+        # (macro) model. (Earlier this also sent "stuck" to the blind code model,
+        # but a 30-generation run showed that left the model unable to get past
+        # unfamiliar geometry it could not see -- 0 vision calls, hard plateau.)
+        if "timeout" in failure_reason.lower() or not screenshot_path:
             raw_response, reasoning = self._call_micro_model(prompt, temperature)
         else:
-            # Fatal error, died to enemy/pit. Needs visual analysis.
             raw_response, reasoning = self._call_macro_model(prompt, screenshot_path)
 
         # Clean up markdown if the LLM wrapped it anyway

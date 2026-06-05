@@ -25,10 +25,12 @@ This project uses a Large Language Model (LLM) as a genetic algorithm mutator to
 
 To maximize efficiency and minimize API costs, the mutator (`llm/mutator.py`) intelligently routes its requests based on exactly *how* Sonic failed the previous run. Using the standard OpenAI Python SDK, the pipeline universally supports almost every modern AI engine:
 
-*   **Local LLMs (Micro-Mutations):** If Sonic fails due to getting "stuck" or "timing out", the pipeline assumes this is a physics or logic bug in the Python code. It passes the failure coordinate trace to a **local, free LLM** to debug the code without needing visual context. 
+*   **Local LLMs (Micro-Mutations):** A *pure code fault* — an infinite loop caught as a timeout, or any failure where no screenshot is available — is routed to a **local, free LLM** with the failure coordinate trace, to debug the code without visual context.
     *   *Supported:* **LM Studio, Ollama, llama.cpp, vLLM, SGLang, and Apple MLX** (any engine exposing a `/v1` endpoint).
-*   **Cloud LLMs (Macro-Mutations):** If Sonic dies to a fatal hazard (like an enemy or a spike pit), the pipeline captures a screenshot of the death frame. This is sent to a heavy-duty **cloud vision model**, which acts as the "eyes" to visually analyze the level architecture and rewrite the policy.
-    *   *Supported:* **Google Gemini, Anthropic Claude, OpenAI ChatGPT, Kimi (Moonshot), and OpenRouter.**
+*   **Vision LLMs (Macro-Mutations):** A *visual* failure — Sonic physically **stuck** against level geometry, or **killed** by a hazard (enemy/spike pit) — captures the failure frame and sends it to a **vision model** that acts as the "eyes" to analyze the obstacle and rewrite the policy. This can be a cloud model or a local vision model (e.g. a Gemma/Qwen-VL in LM Studio).
+    *   *Supported:* **Google Gemini, Anthropic Claude, OpenAI ChatGPT, Kimi (Moonshot), OpenRouter, or any local vision model.**
+
+    > A 30-generation run surfaced this: originally "stuck" was treated as a blind code bug and sent to the code model, but with **zero** vision calls the agent could never get past Act 2 geometry it couldn't see (a hard plateau). Stuck failures now get eyes, since being blocked is fundamentally a visual problem.
 
 ## How This Differs from Other LLM Game Agents
 
@@ -40,7 +42,7 @@ LLM-driven game agents broadly fall into two camps:
 This project sits firmly in the **code-evolver** camp, so the paradigm itself is not new. What we believe is a distinctive combination (we are not aware of another open-source project pulling all of these together):
 
 1. **A real-time reflex platformer, not math or turn-based games.** The evolved `get_action(state)` runs at 60 fps on a momentum-driven Genesis platformer (Sonic via gym-/stable-retro), where most code-evolution work targets static optimization (FunSearch) or simpler Atari/turn-based games.
-2. **Failure-conditioned, two-tier model routing** (see above): visual deaths go to a cloud vision model from the death frame; "stuck"/"timeout" code bugs go to a *local, free* LLM. Vision is used for **diagnosis at failure points**, not per-frame perception.
+2. **Failure-conditioned, two-tier model routing** (see above): visual failures (Sonic stuck against geometry or killed by a hazard) go to a vision model from the failure frame; pure code faults (timeouts/infinite loops) go to a *local, free* LLM. Vision is used for **diagnosis at failure points**, not per-frame perception.
 3. **Local-first.** The bulk of mutations run on a local model, with the cloud VLM called only on visual failures — so a full evolutionary run is nearly free.
 4. **A hybrid of three methods in one loop** — a [Voyager](https://arxiv.org/abs/2305.16291)-style skill library, FunSearch-style crossover over a diversity-preserving policy pool, and VLM failure analysis — with a live dashboard and a continuous multi-act play-through fitness.
 

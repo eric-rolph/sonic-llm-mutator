@@ -113,7 +113,7 @@ class MutatorMemoryTests(unittest.TestCase):
         self.assertEqual(mutator.called, ["micro"])
         self.assertIn("return 'RIGHT'", code)
 
-    def test_mutate_policy_routes_code_failures_to_micro_and_visual_to_macro(self):
+    def test_mutate_policy_routes_visual_failures_to_vision_and_code_faults_to_micro(self):
         class RecordingMutator(MutatorClient):
             def __init__(self):
                 self.called = []
@@ -126,22 +126,29 @@ class MutatorMemoryTests(unittest.TestCase):
                 self.called.append("macro")
                 return "code", "macro"
 
-        # Stuck / timeout are code-or-physics bugs -> local model, even when a
-        # screenshot is available.
-        for reason in (
-            "Sonic got stuck: stopped making forward progress for 8 seconds. (zone 0 act 1)",
-            "Policy code timeout (likely an infinite loop in get_action).",
-        ):
+        stuck = "Sonic got stuck: stopped making forward progress for 8 seconds. (zone 0 act 1)"
+        fatal = "Sonic lost a life or hit a fatal obstacle."
+        timeout = "Policy code timeout (likely an infinite loop in get_action)."
+
+        # Visual problems (stuck against geometry, killed by a hazard) need the
+        # model to SEE the frame -> vision/macro, when a screenshot is available.
+        for reason in (stuck, fatal):
             mutator = RecordingMutator()
             with redirect_stdout(StringIO()):
                 mutator.mutate_policy("code", reason, "shot.png", [])
-            self.assertEqual(mutator.called, ["micro"], reason)
+            self.assertEqual(mutator.called, ["macro"], reason)
 
-        # A fatal visual hazard with a screenshot -> cloud vision model.
+        # A pure code fault (timeout / infinite loop) -> local code model.
         mutator = RecordingMutator()
         with redirect_stdout(StringIO()):
-            mutator.mutate_policy("code", "Sonic lost a life or hit a fatal obstacle.", "shot.png", [])
-        self.assertEqual(mutator.called, ["macro"])
+            mutator.mutate_policy("code", timeout, "shot.png", [])
+        self.assertEqual(mutator.called, ["micro"])
+
+        # No frame to look at -> fall back to the local code model regardless.
+        mutator = RecordingMutator()
+        with redirect_stdout(StringIO()):
+            mutator.mutate_policy("code", stuck, None, [])
+        self.assertEqual(mutator.called, ["micro"])
 
 
 if __name__ == "__main__":
