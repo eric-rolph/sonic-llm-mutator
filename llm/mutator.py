@@ -225,8 +225,11 @@ def get_action(state):
                 }
             ],
             temperature=0.7,
-            max_tokens=2048,
-            timeout=60
+            # Match the micro path: a reasoning vision model (e.g. gemma) spends
+            # tokens thinking before it emits code, so a small cap truncates the
+            # policy mid-output and the extracted fragment fails to parse.
+            max_tokens=8192,
+            timeout=300
         )
 
         text = message_text(response.choices[0].message)
