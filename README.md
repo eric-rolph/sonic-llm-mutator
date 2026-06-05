@@ -30,6 +30,22 @@ To maximize efficiency and minimize API costs, the mutator (`llm/mutator.py`) in
 *   **Cloud LLMs (Macro-Mutations):** If Sonic dies to a fatal hazard (like an enemy or a spike pit), the pipeline captures a screenshot of the death frame. This is sent to a heavy-duty **cloud vision model**, which acts as the "eyes" to visually analyze the level architecture and rewrite the policy.
     *   *Supported:* **Google Gemini, Anthropic Claude, OpenAI ChatGPT, Kimi (Moonshot), and OpenRouter.**
 
+## How This Differs from Other LLM Game Agents
+
+LLM-driven game agents broadly fall into two camps:
+
+* **LLM-in-the-loop** — a vision-language model perceives the screen and chooses an action every turn or frame, so the LLM *is* the runtime policy. Most current work is here: harnesses and benchmarks such as [GamingAgent](https://github.com/lmgame-org/GamingAgent), [lmgame-Bench](https://arxiv.org/abs/2505.15146), and [Orak](https://arxiv.org/abs/2506.03610) (and the well-known "Claude/Gemini plays Pokémon" runs). Play is slow and costs an API call per decision.
+* **LLM-as-code-evolver** — the LLM evolves a standalone program *offline*; the evolved program then plays at native speed. This is the lineage of [Evolution through Large Models (ELM)](https://arxiv.org/abs/2206.08896), [FunSearch](https://www.nature.com/articles/s41586-023-06924-6), and — for games specifically — [Learning Game-Playing Agents with Generative Code Optimization](https://arxiv.org/abs/2508.19506) (Atari).
+
+This project sits firmly in the **code-evolver** camp, so the paradigm itself is not new. What we believe is a distinctive combination (we are not aware of another open-source project pulling all of these together):
+
+1. **A real-time reflex platformer, not math or turn-based games.** The evolved `get_action(state)` runs at 60 fps on a momentum-driven Genesis platformer (Sonic via gym-/stable-retro), where most code-evolution work targets static optimization (FunSearch) or simpler Atari/turn-based games.
+2. **Failure-conditioned, two-tier model routing** (see above): visual deaths go to a cloud vision model from the death frame; "stuck"/"timeout" code bugs go to a *local, free* LLM. Vision is used for **diagnosis at failure points**, not per-frame perception.
+3. **Local-first.** The bulk of mutations run on a local model, with the cloud VLM called only on visual failures — so a full evolutionary run is nearly free.
+4. **A hybrid of three methods in one loop** — a [Voyager](https://arxiv.org/abs/2305.16291)-style skill library, FunSearch-style crossover over a diversity-preserving policy pool, and VLM failure analysis — with a live dashboard and a continuous multi-act play-through fitness.
+
+The payoff of evolving code rather than playing in the loop: the resulting policy is **fast, ~zero-marginal-cost at runtime, deterministic, and human-readable Python** you can diff to see exactly what it learned — versus an in-loop agent that re-pays latency and API cost on every frame.
+
 ## Resilience Features
 
 To ensure the pipeline can run continuously without manual intervention:
