@@ -423,6 +423,15 @@ Recent History of Failures:
 Note on Vision Context: The emulator now actively looks at the screen every 5 seconds. The immediate upcoming visual context is injected into `state['vision_context']` (e.g., 'ENEMY', 'CLEAR', 'SPIKES'). You can write logic to check this string!
 
 Analyze the failure and rewrite `get_action(state)`.
+
+CRITICAL — preserve progress: the current code already makes real progress before it
+fails. Keep its existing working logic and structure intact and change the SMALLEST
+amount needed to get past the specific failure shown above. Do NOT delete working
+rules or rewrite unrelated sections, or you will regress earlier progress.
+Note that `x_pos` resets to ~0 at the start of each act and `state['zone']`/`state['act']`
+tell you which act you are in — when handling a NEW act, prefer general
+velocity/vision-based logic over hardcoded x-coordinates (which only apply to one act).
+
 Return ONLY valid Python code, starting with `def get_action(state):`.
 
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
