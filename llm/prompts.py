@@ -32,17 +32,30 @@ Prefer these macro-actions unless the failure context clearly requires a differe
 Sonic relies on momentum. Do not just write static positional checks like `if x == 100: jump()`.
 Instead, use physics-aware logic like `if state['x_velocity'] < 2.0 and obstacle_ahead: jump()`.
 
+The run is a CONTINUOUS play-through: when Sonic clears an act the game advances
+to the next one and `x_pos` resets to ~0. The biggest reward by far is clearing
+whole acts, so aim for a policy that generalizes across levels, not one tuned to
+a single act's geometry. `state['zone']` and `state['act']` tell you which level
+you are in (zone 0 = Green Hill, 1 = Marble, 2 = Spring Yard, 3 = Labyrinth,
+4 = Star Light, 5 = Scrap Brain); you may branch on them when a level needs
+different tactics (e.g. Labyrinth has water).
+
 You MUST return the raw python code and nothing else. No markdown wrappers around the code.
 
 Example state dictionary passed to your function:
 state = {
     "x_pos": 1420,
     "y_pos": 300,
+    "x_velocity": 5,
+    "y_velocity": 0,
+    "zone": 0,
+    "act": 0,
     "screen_x": 1300,
     "screen_y": 250,
     "rings": 3,
     "lives": 3,
-    "score": 100
+    "score": 100,
+    "vision_context": "CLEAR"
 }
 """.replace("__RECOMMENDED_ACTIONS__", _RECOMMENDED_ACTIONS_TEXT)
 

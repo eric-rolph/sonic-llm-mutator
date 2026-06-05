@@ -73,14 +73,14 @@ with col1:
         latest = history_data[-1]
         all_time_champion_fitness = max([entry.get('fitness', -1) for entry in history_data]) if history_data else 0
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        comps = latest.get("components", {})
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("All-Time Champion Fitness 🏆", f"{all_time_champion_fitness:.2f}")
         c2.metric("Latest Attempt Fitness 🧪", f"{latest['fitness']:.2f}")
-
-        comps = latest.get("components", {})
-        c3.metric("Latest Distance", f"{comps.get('distance', 0):.2f}")
-        c4.metric("Latest Speed Bonus", f"{comps.get('speed', 0):.2f}")
-        c5.metric("Latest Rings/Pts", f"{comps.get('rings', 0) + comps.get('score', 0):.2f}")
+        c3.metric("Levels Cleared 🏁", int(comps.get('levels_cleared', 0)))
+        c4.metric("Latest Distance", f"{comps.get('distance', 0):.2f}")
+        c5.metric("Latest Speed Bonus", f"{comps.get('speed', 0):.2f}")
+        c6.metric("Latest Rings/Pts", f"{comps.get('rings', 0) + comps.get('score', 0):.2f}")
 
         st.markdown("**LLM Reasoning for latest mutation:**")
         st.info(latest.get("llm_reasoning", "No reasoning provided."))

@@ -88,11 +88,13 @@ ruff check .
 
 CI runs the same lint + test steps on Python 3.8 and 3.11 (`.github/workflows/evaluate_policy.yml`).
 
-## Speedrun-First Evaluation
+## Speedrun-First, Continuous Play-Through
 
-The current training target is Green Hill Zone Act 1 speedrun performance. Fitness now favors distance and fewer frames, with rings and game score treated as small tie-breakers. A completion bonus is awarded once a policy reaches the active state's end-zone threshold, falling back to the Act 1 threshold when the emulator does not expose one.
+Training starts at Green Hill Zone Act 1, but evaluation is a **continuous play-through**: when a policy clears an act, the game advances to the next one and the runner keeps going (detected via the emulator's `zone`/`act` values). Fitness rewards, in order of weight: **acts cleared**, then total distance, then speed (fewer frames), with rings/score as small tie-breakers and a completion bonus for reaching the current act's end zone. Per-act progress is reset on each transition so the x-coordinate dropping back to ~0 in the next act is not mistaken for getting stuck.
 
-Mutation prompts receive compact frame traces with position, velocity, rings, vision context, and the action taken. Fatal visual failures also use a small recent-frame montage when screenshots are available, giving the macro model more context than a single final frame.
+This rewards a policy that *generalizes* across levels rather than one overfit to Act 1's geometry. `state['zone']` and `state['act']` are exposed to the policy so it can branch per level (e.g. Labyrinth's water sections). The training frame budget (`max_frames`) spans several acts; weak candidates still terminate early via stuck-detection, so the larger budget only costs wall-clock on genuinely strong runs.
+
+Mutation prompts receive compact frame traces with position, velocity, zone/act, rings, vision context, and the action taken. Fatal visual failures also use a small recent-frame montage when screenshots are available, giving the macro model more context than a single final frame.
 
 The policy pool keeps a small amount of action-signature diversity instead of pruning strictly by score, so crossover has access to policies with different controller habits.
 
