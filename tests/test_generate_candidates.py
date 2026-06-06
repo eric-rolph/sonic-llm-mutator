@@ -4,7 +4,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from main import generate_candidates, load_pool_codes
+from main import build_frontier_guard_candidate, generate_candidates, load_pool_codes
 
 
 class FakeMutator:
@@ -34,6 +34,47 @@ def generate_silently(*args, **kwargs):
 
 
 class GenerateCandidatesTests(unittest.TestCase):
+    def test_build_frontier_guard_candidate_preserves_code_and_adds_narrow_recovery(self):
+        working = "def get_action(state):\n    return 'RIGHT,DOWN'\n"
+        trace = [
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+        ]
+
+        candidate = build_frontier_guard_candidate(working, trace)
+
+        self.assertIn("FRONTIER_GUARD zone=0 act=1 x=1077", candidate)
+        self.assertIn('return "RIGHT,B"', candidate)
+        self.assertIn("return 'RIGHT,DOWN'", candidate)
+
+    def test_build_frontier_guard_candidate_requires_repeated_stationary_trace(self):
+        working = "def get_action(state):\n    return 'RIGHT'\n"
+        moving = [
+            {"zone": 0, "act": 1, "x": 1000, "x_velocity": 3.0, "action": "RIGHT"},
+            {"zone": 0, "act": 1, "x": 1100, "x_velocity": 3.0, "action": "RIGHT"},
+            {"zone": 0, "act": 1, "x": 1200, "x_velocity": 3.0, "action": "RIGHT"},
+        ]
+
+        self.assertIsNone(build_frontier_guard_candidate(working, moving))
+
+    def test_stationary_frontier_reserves_one_candidate_without_llm_rewrite(self):
+        mutator = FakeMutator()
+        working = "def get_action(state):\n    return 'RIGHT,DOWN'\n"
+        trace = [
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+        ]
+
+        result = generate_silently(
+            mutator, working, "reason", None, [], trace, 2, [], crossover_probability=0.0
+        )
+
+        self.assertIn("FRONTIER_GUARD", result[0][0])
+        self.assertEqual(result[0][1], "Deterministic frontier guard")
+        self.assertEqual(mutator.mutate_calls, 1)
+
     def test_returns_one_code_reasoning_tuple_per_candidate(self):
         mutator = FakeMutator()
         result = generate_silently(

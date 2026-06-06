@@ -7,8 +7,10 @@ import main
 from main import (
     build_stagnation_escape_context,
     evaluate_working_baseline,
+    preserve_frontier_screenshot,
     resolve_end_generation,
     seed_population_baseline,
+    select_working_frontier_context,
 )
 
 
@@ -122,6 +124,43 @@ class RunResumeTests(unittest.TestCase):
         self.assertEqual(context["last_trace"], trace)
         self.assertEqual(context["last_screenshot"], "failure.png")
         self.assertIn("preserve", context["last_failure_reason"].lower())
+
+    def test_losing_candidate_does_not_replace_working_frontier_context(self):
+        working = {
+            "failure_reason": "champion stuck in act 2",
+            "trace": [{"zone": 0, "act": 1, "x": 1077}],
+            "screenshot": "working-frontier.png",
+        }
+        losing_candidate = {
+            "failure_reason": "candidate stuck in act 1",
+            "trace": [{"zone": 0, "act": 0, "x": 3061}],
+            "screenshot": "candidate.png",
+        }
+
+        selected = select_working_frontier_context(working, losing_candidate, promoted=False)
+
+        self.assertEqual(selected, working)
+        self.assertIsNot(selected, working)
+
+    def test_promoted_candidate_replaces_working_frontier_context(self):
+        working = {"failure_reason": "old", "trace": [], "screenshot": "old.png"}
+        promoted = {"failure_reason": "new", "trace": [1], "screenshot": "new.png"}
+
+        self.assertEqual(select_working_frontier_context(working, promoted, promoted=True), promoted)
+
+    def test_frontier_screenshot_is_copied_away_from_shared_candidate_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "latest.png")
+            destination = os.path.join(tmp, "working-frontier.png")
+            with open(source, "wb") as f:
+                f.write(b"champion")
+
+            preserved = preserve_frontier_screenshot(source, destination)
+            with open(source, "wb") as f:
+                f.write(b"losing candidate")
+
+            with open(preserved, "rb") as f:
+                self.assertEqual(f.read(), b"champion")
 
     def test_additional_generation_limit_is_relative_to_resume_point(self):
         self.assertEqual(resolve_end_generation(start_gen=498, max_generations=500, generations=15), 512)

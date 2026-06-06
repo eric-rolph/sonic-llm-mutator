@@ -167,6 +167,13 @@ Stagnation resets exploration context without discarding that champion. The
 smaller legacy policy pool remains a fallback while a new archive is being
 populated.
 
+When the working policy's trace proves it is repeatedly stationary at one
+zone/act/x frontier, one candidate slot receives a deterministic narrow
+recovery guard while the other remains available for LLM mutation or
+crossover. This preserves all established behavior and gives the search a
+hill-climbing path around full-policy rewrites that would otherwise regress
+earlier acts before fixing the current frontier.
+
 ## Emulator Backends
 
 The runtime supports both the maintained `stable-retro` API and the existing `gym-retro` install. The default backend is `auto`: it tries the modern `stable_retro` import first and falls back to legacy `retro` when stable-retro is not installed.

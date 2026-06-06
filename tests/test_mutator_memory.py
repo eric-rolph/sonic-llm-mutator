@@ -113,6 +113,29 @@ class MutatorMemoryTests(unittest.TestCase):
         self.assertEqual(mutator.called, ["micro"])
         self.assertIn("return 'RIGHT'", code)
 
+    def test_mutate_policy_marks_primary_frontier_and_other_candidate_history(self):
+        class RecordingMutator(MutatorClient):
+            def __init__(self):
+                self.prompt = ""
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                self.prompt = prompt
+                return "def get_action(state):\n    return 'RIGHT'", "micro"
+
+        mutator = RecordingMutator()
+        with redirect_stdout(StringIO()):
+            mutator.mutate_policy(
+                current_code="def get_action(state):\n    return 'RIGHT'",
+                failure_reason="champion stuck in act 2",
+                screenshot_path=None,
+                recent_history=[{"failure_reason": "loser stuck in act 1"}],
+                coordinate_trace=[{"zone": 0, "act": 1, "x": 1077}],
+            )
+
+        self.assertIn("working policy's own frontier", mutator.prompt)
+        self.assertIn("Other Evaluated Candidates", mutator.prompt)
+        self.assertIn("may not apply to the current code", mutator.prompt)
+
     def test_mutate_policy_routes_visual_failures_to_vision_and_code_faults_to_micro(self):
         class RecordingMutator(MutatorClient):
             def __init__(self):
