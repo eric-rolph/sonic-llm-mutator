@@ -1,3 +1,4 @@
+import argparse
 import concurrent.futures
 import glob
 import hashlib
@@ -562,7 +563,20 @@ def generate_candidates(
     return candidates_code
 
 
-def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, stagnation_limit=5, action_repeat=1):
+def resolve_end_generation(start_gen, max_generations, generations=None):
+    if generations is None:
+        return max_generations
+    return start_gen + generations - 1
+
+
+def run_evaluation_loop(
+    max_generations=500,
+    max_frames=12000,
+    n_candidates=2,
+    stagnation_limit=5,
+    action_repeat=1,
+    generations=None,
+):
     # max_frames now spans several acts (~3-4k frames each) so a strong policy
     # can play through. Weak candidates still terminate early via stuck-detection,
     # so the larger budget only costs wall-clock for genuinely good runs.
@@ -609,7 +623,8 @@ def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, s
     last_screenshot = baseline_context["last_screenshot"]
     seed_population_baseline(population, working_path, baseline_context)
 
-    for gen in range(start_gen, max_generations + 1):
+    end_gen = resolve_end_generation(start_gen, max_generations, generations)
+    for gen in range(start_gen, end_gen + 1):
         print(f"\n--- Generation {gen} ---")
 
         if stagnation_counter >= stagnation_limit:
@@ -791,5 +806,16 @@ def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, s
         last_trace = best_candidate_trace
         last_screenshot = best_candidate_screenshot
 
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Run the Sonic policy evolution loop.")
+    parser.add_argument("--generations", type=int, help="Number of additional generations to run.")
+    parser.add_argument("--frames", type=int, default=12000, help="Maximum emulator frames per candidate.")
+    args = parser.parse_args(argv)
+
+    run_evaluation_loop(generations=args.generations, max_frames=args.frames)
+    return 0
+
+
 if __name__ == "__main__":
-    run_evaluation_loop()
+    raise SystemExit(main())
