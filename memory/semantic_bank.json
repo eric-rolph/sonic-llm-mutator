@@ -248,5 +248,15 @@
         "x": 1077,
         "hazard": "Wall/Slope Collision",
         "lesson": "Avoid using 'RIGHT,DOWN' when x_velocity is 0, as it can cause Sonic to get stuck against walls; use 'RIGHT' or jump ('RIGHT,B') to regain momentum."
+    },
+    {
+        "x": 2164,
+        "hazard": "Lack of momentum/Slow progress",
+        "lesson": "To avoid timeouts, maintain consistent RIGHT input and minimize frequent switching to DOWN (rolling) unless necessary, as this can disrupt top speed and overall progression."
+    },
+    {
+        "x": 2164,
+        "hazard": "Lack of momentum/Slow progress",
+        "lesson": "Maintain high x_velocity by consistently holding RIGHT and using jumps to clear obstacles instead of slowing down."
     }
 ]
