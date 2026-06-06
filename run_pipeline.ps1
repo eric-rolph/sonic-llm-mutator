@@ -1,6 +1,6 @@
 param (
     [int]$Generations = 100,
-    [int]$Frames = 2000
+    [int]$Frames = 12000
 )
 
 Write-Host "Starting Sonic LLM Mutator Pipeline Simulation..." -ForegroundColor Cyan
@@ -33,6 +33,6 @@ if (-Not (Test-Path $romPath)) {
 
 # 3. Run Pipeline
 Write-Host "Executing Mutator Loop ($Generations generations, $Frames frames/gen)..." -ForegroundColor Cyan
-python -u main.py
+python -u main.py --generations $Generations --frames $Frames
 
 Write-Host "Pipeline Simulation Complete." -ForegroundColor Green

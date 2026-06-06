@@ -1,8 +1,15 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from main import build_stagnation_escape_context, evaluate_working_baseline, seed_population_baseline
+import main
+from main import (
+    build_stagnation_escape_context,
+    evaluate_working_baseline,
+    resolve_end_generation,
+    seed_population_baseline,
+)
 
 
 class RecordingArchive:
@@ -115,6 +122,15 @@ class RunResumeTests(unittest.TestCase):
         self.assertEqual(context["last_trace"], trace)
         self.assertEqual(context["last_screenshot"], "failure.png")
         self.assertIn("preserve", context["last_failure_reason"].lower())
+
+    def test_additional_generation_limit_is_relative_to_resume_point(self):
+        self.assertEqual(resolve_end_generation(start_gen=498, max_generations=500, generations=15), 512)
+
+    def test_cli_passes_bounded_run_options_to_evaluation_loop(self):
+        with patch.object(main, "run_evaluation_loop") as run:
+            self.assertEqual(main.main(["--generations", "15", "--frames", "2000"]), 0)
+
+        run.assert_called_once_with(generations=15, max_frames=2000)
 
 
 if __name__ == "__main__":

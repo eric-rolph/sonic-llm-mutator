@@ -121,6 +121,13 @@ To ensure the pipeline can run continuously without manual intervention:
     ```bash
     python main.py
     ```
+    For a bounded resume test, `--generations` means additional generations
+    from the current history endpoint:
+    ```powershell
+    .\run_pipeline.ps1 -Generations 15 -Frames 12000
+    # Equivalent:
+    python main.py --generations 15 --frames 12000
+    ```
 5.  Run the live dashboard in a separate terminal:
     ```bash
     streamlit run dashboard.py
