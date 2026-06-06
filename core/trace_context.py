@@ -28,6 +28,8 @@ def build_trace_entry(frame, state, action_string):
         "frame": int(frame),
         "x": _integer(state.get("x_pos", 0)),
         "y": _integer(state.get("y_pos", 0)),
+        "zone": _integer(state.get("zone", 0)),
+        "act": _integer(state.get("act", 0)),
         "screen_x": _integer(state.get("screen_x", 0)),
         "screen_y": _integer(state.get("screen_y", 0)),
         "x_velocity": round(_numeric(state.get("x_velocity", 0.0)), 3),

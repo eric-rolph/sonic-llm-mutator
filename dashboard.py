@@ -1,9 +1,11 @@
-import streamlit as st
 import json
 import os
-import time
+
 import pandas as pd
+import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+
+from core.evaluator import FITNESS_FORMULA
 
 # Set page layout to wide
 st.set_page_config(layout="wide", page_title="Sonic LLM Mutator Dashboard", page_icon="🦔")
@@ -26,7 +28,7 @@ def load_data():
             with open(HISTORY_PATH, "r") as f:
                 data = json.load(f)
                 return data
-        except:
+        except (OSError, json.JSONDecodeError):
             return []
     return []
 
@@ -67,44 +69,47 @@ with col1:
         df = pd.DataFrame(history_data)
         # Plot Fitness over generations
         st.line_chart(df.set_index("generation")["fitness"])
-        
+
         latest = history_data[-1]
         all_time_champion_fitness = max([entry.get('fitness', -1) for entry in history_data]) if history_data else 0
-        
-        c1, c2, c3, c4, c5 = st.columns(5)
+
+        comps = latest.get("components", {})
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("All-Time Champion Fitness 🏆", f"{all_time_champion_fitness:.2f}")
         c2.metric("Latest Attempt Fitness 🧪", f"{latest['fitness']:.2f}")
-        
-        comps = latest.get("components", {})
-        c3.metric("Latest Distance", f"{comps.get('distance', 0):.2f}")
-        c4.metric("Latest Speed Bonus", f"{comps.get('speed', 0):.2f}")
-        c5.metric("Latest Rings/Pts", f"{comps.get('rings', 0) + comps.get('score', 0):.2f}")
-        
+        c3.metric("Levels Cleared 🏁", int(comps.get('levels_cleared', 0)))
+        c4.metric("Latest Distance", f"{comps.get('distance', 0):.2f}")
+        c5.metric("Latest Speed Bonus", f"{comps.get('speed', 0):.2f}")
+        c6.metric("Latest Rings/Pts", f"{comps.get('rings', 0) + comps.get('score', 0):.2f}")
+
         st.markdown("**LLM Reasoning for latest mutation:**")
         st.info(latest.get("llm_reasoning", "No reasoning provided."))
-        
+
         st.markdown("**Failure Reason:**")
         st.error(latest.get("failure_reason", "Unknown"))
-        
+
         with st.sidebar:
             st.header("🧮 Fitness Calculation")
-            st.markdown("`fitness = (distance * 2) + ((distance / frames) * 100) + (rings * 10) + score`")
-            st.caption("The AI is highly incentivized to move right as fast as possible, with small bonuses for rings/points.")
-            
+            st.markdown(f"`{FITNESS_FORMULA}`")
+            st.caption("The AI is highly incentivized to move right as fast as possible, with small bonuses for rings/points. A one-off completion bonus is awarded for reaching the level's end zone.")
+
             st.header("⚠️ Stagnation Monitor")
             stag_count = latest.get("stagnation_counter", 0)
             if stag_count > 3:
-                st.error(f"Stagnation Level: {stag_count}/5\nA blankRestart mutation is imminent!")
+                st.warning(
+                    f"Stagnation Level: {stag_count}/5\n"
+                    "The champion will be preserved while the mutator explores a distinct strategy."
+                )
             elif stag_count > 0:
                 st.warning(f"Stagnation Level: {stag_count}/5\nThe AI is struggling to beat the champion.")
             else:
-                st.success(f"Stagnation Level: 0/5\nMaking steady progress!")
+                st.success("Stagnation Level: 0/5\nMaking steady progress!")
     else:
         st.info("No history data available yet.")
 
 with col2:
     st.subheader("💻 AI Generated Python Policies")
-    
+
     # Load code strings
     champ_code = ""
     if os.path.exists(CHAMPION_PATH):
@@ -120,13 +125,13 @@ with col2:
                 latest_code = f.read()
 
     tab1, tab2, tab3 = st.tabs(["🏆 Champion Policy", "🧪 Latest Mutation", "🔍 Active Diff"])
-    
+
     with tab1:
         if champ_code:
             st.code(champ_code, language="python")
         else:
             st.info("Champion policy file not found.")
-            
+
     with tab2:
         if latest_code:
             st.code(latest_code, language="python")

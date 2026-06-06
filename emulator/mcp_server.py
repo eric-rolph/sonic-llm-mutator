@@ -1,13 +1,16 @@
-from mcp.server.fastmcp import FastMCP
-from emulator.sonic_env import SonicEnvWrapper
 import os
 import time
+
+from mcp.server.fastmcp import FastMCP
+
+from core.actions import action_string_to_array
+from emulator.sonic_env import SonicEnvWrapper
 
 # Initialize the MCP Server
 mcp = FastMCP("Sonic Emulator MCP")
 
 # Global environment instance
-# In a real setup, we might want to manage the lifecycle better, but for MCP 
+# In a real setup, we might want to manage the lifecycle better, but for MCP
 # being invoked as a process, we can keep a singleton-like instance.
 _env = None
 
@@ -53,21 +56,14 @@ def step_frames(action_string: str, frames: int = 1) -> str:
     Valid buttons: B, A, MODE, START, UP, DOWN, LEFT, RIGHT, C, Y, X, Z
     """
     env = get_env()
-    
-    # Genesis mapping: B, A, MODE, START, UP, DOWN, LEFT, RIGHT, C, Y, X, Z
-    buttons = ['B', 'A', 'MODE', 'START', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'C', 'Y', 'X', 'Z']
-    action_array = [0] * 12
-    
-    pressed = [b.strip().upper() for b in action_string.split(',')] if action_string else []
-    for p in pressed:
-        if p in buttons:
-            action_array[buttons.index(p)] = 1
-            
+
+    action_array = action_string_to_array(action_string)
+
     for _ in range(frames):
         obs, reward, done, info = env.step(action_array)
         if done:
             break
-            
+
     return f"Stepped {frames} frames with action {action_string}. Current state: {env.get_state()}"
 
 if __name__ == "__main__":

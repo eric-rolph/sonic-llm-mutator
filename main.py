@@ -1,16 +1,47 @@
-import os
-import time
-import sys
+import concurrent.futures
+import glob
+import hashlib
 import importlib.util
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+
 sys.path.insert(0, os.path.abspath("."))
 
+from core.actions import action_string_to_array
 from core.evaluator import calculate_fitness
 from core.history import EvolutionHistory
+from core.policy_runner import PolicyRunner, PolicyTimeout
+from core.policy_validator import validate_policy_source
+from core.population import PopulationArchive
 from core.trace_context import build_screenshot_montage, build_trace_entry
 from llm.mutator import MutatorClient
 
+# Cadence for in-loop sampling, measured in emulator frames. Counter-based
+# checks below ensure these still fire when action_repeat does not evenly divide
+# the interval (a plain `frames % N == 0` test would silently skip).
+VISION_INTERVAL = 300   # proactive cloud-vision tagging (~5s at 60fps)
+TRACE_INTERVAL = 30     # rich trace entries (~0.5s at 60fps)
+CONTEXT_SCREENSHOT_SLOTS = 3  # bound on-disk context shots to a small ring
+# After an act transition the emulator keeps reporting the previous act's x for
+# a few frames before it resets to the new act's start. Re-baseline max_x to the
+# live x (and suspend stuck-detection) for this many frames so the stale value
+# is not treated as current-act progress.
+LEVEL_SETTLE_FRAMES = 150
+# Terminate a run once Sonic makes no forward progress for this many frames
+# (~8s at 60fps). Counted in frames (not loop iterations) so the threshold is
+# unaffected by action_repeat.
+STUCK_FRAME_LIMIT = 500
+
+
 def load_policy(filepath):
     """Loads a python script dynamically."""
+    with open(filepath, "r", encoding="utf-8") as f:
+        validate_policy_source(f.read())
     spec = importlib.util.spec_from_file_location("current_policy", filepath)
     policy_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(policy_module)
@@ -23,6 +54,7 @@ def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbo
         "last_failure_reason": "Initial seed run",
         "last_screenshot": None,
         "last_trace": [],
+        "components": {},
     }
     if env is None or not os.path.exists(working_path):
         return context
@@ -52,9 +84,40 @@ def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbo
             "last_failure_reason": failure_reason,
             "last_screenshot": screenshot_path,
             "last_trace": trace,
+            "components": components,
         }
     )
     return context
+
+
+def seed_population_baseline(archive, working_path, baseline_context):
+    """Admit the evaluated working policy so early crossover has a strong parent."""
+    if baseline_context.get("working_fitness", -1.0) < 0 or not os.path.exists(working_path):
+        return False
+    with open(working_path, "r", encoding="utf-8") as f:
+        code = f.read()
+    return record_candidate_evaluation(
+        archive,
+        code,
+        baseline_context["working_fitness"],
+        baseline_context.get("components", {}),
+        baseline_context.get("last_failure_reason", "Working policy baseline"),
+        baseline_context.get("last_trace", []),
+        "Working policy baseline",
+    )
+
+
+def build_stagnation_escape_context(working_fitness, last_trace, last_screenshot):
+    """Preserve the champion while asking mutations to explore a distinct strategy."""
+    return {
+        "working_fitness": working_fitness,
+        "last_failure_reason": (
+            "Stagnation plateau: preserve the current working policy, but try a distinct "
+            "minimal strategy that is not already represented in recent candidates."
+        ),
+        "last_trace": last_trace,
+        "last_screenshot": last_screenshot,
+    }
 
 
 def build_policy_load_failure(error):
@@ -77,6 +140,86 @@ def clear_candidate_recording(record_dir, candidate_idx):
         os.remove(candidate_bk2_path)
 
 
+def record_candidate_evaluation(
+    archive,
+    code,
+    fitness,
+    components,
+    failure_reason,
+    trace,
+    reasoning,
+):
+    """Record a candidate without allowing archive failures to stop training."""
+    try:
+        archive.record_evaluation(
+            code,
+            fitness=fitness,
+            components=components,
+            failure_reason=failure_reason,
+            trace=trace,
+            reasoning=reasoning,
+        )
+        return True
+    except Exception as e:
+        print(f"Failed to record candidate in population archive: {e}")
+        return False
+
+
+def prepare_candidate_policy(candidate_path, code, reasoning, mutator, archive):
+    """Load a candidate, making at most one local repair after validation failure."""
+    with open(candidate_path, "w", encoding="utf-8") as f:
+        f.write(code)
+
+    try:
+        policy = load_policy(candidate_path)
+        return {
+            "code": code,
+            "reasoning": reasoning,
+            "policy": policy,
+            "load_error": None,
+        }
+    except Exception as original_error:
+        original_error_text = str(original_error)
+        record_candidate_evaluation(
+            archive,
+            code,
+            0.0,
+            {"load_error": original_error_text, "repair_stage": "original"},
+            f"Policy failed to load before repair: {original_error_text}",
+            [],
+            reasoning,
+        )
+
+    try:
+        repaired_code, repair_reasoning = mutator.repair_policy(code, original_error_text)
+    except Exception as repair_error:
+        return {
+            "code": code,
+            "reasoning": reasoning,
+            "policy": None,
+            "load_error": repair_error,
+        }
+
+    repaired_code = str(repaired_code or "")
+    repair_reasoning = str(repair_reasoning or "")
+    combined_reasoning = f"{reasoning}\nValidator repair: {repair_reasoning}".strip()
+    with open(candidate_path, "w", encoding="utf-8") as f:
+        f.write(repaired_code)
+    try:
+        repaired_policy = load_policy(candidate_path)
+        repaired_error = None
+    except Exception as e:
+        repaired_policy = None
+        repaired_error = e
+
+    return {
+        "code": repaired_code,
+        "reasoning": combined_reasoning,
+        "policy": repaired_policy,
+        "load_error": repaired_error,
+    }
+
+
 def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_repeat=1):
     obs = env.reset()
     frames_alive = 0
@@ -87,79 +230,152 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
     state = {}
     completion_x = None
     action_repeat = max(1, int(action_repeat or 1))
-    
+
+    # Continuous play-through bookkeeping. max_x is the furthest point in the
+    # *current* act; cumulative_distance banks the distance of acts already
+    # cleared, and levels_cleared counts how many acts were beaten this episode.
+    levels_cleared = 0
+    cumulative_distance = 0
+    prev_zone_act = None
+    settle_frames_left = 0
+
     current_vision_context = "UNKNOWN"
-    
+
     trace = []
     context_screenshots = []
-    
-    import concurrent.futures
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    
-    while not done and frames_alive < max_frames:
-        state = env.get_state()
-        state_completion_x = state.get("screen_x_end") or state.get("completion_x")
-        if state_completion_x:
-            completion_x = state_completion_x
-        
-        # Proactive Vision Polling: every 300 frames (~5 sec)
-        if frames_alive % 300 == 0:
-            context_path = f"artifacts/failures/context_{frames_alive:06d}.png"
-            shot = capture_screenshot(env, context_path)
-            if shot:
-                context_screenshots.append(shot)
-                context_screenshots = context_screenshots[-3:]
-                current_vision_context = mutator.analyze_environment(shot)
-        
-        state['vision_context'] = current_vision_context
+    vision_poll_count = 0
+    # Initialise so both samplers fire on the first iteration. Using elapsed
+    # frames rather than `frames_alive % N == 0` means the cadence is preserved
+    # even when action_repeat does not evenly divide the interval.
+    last_vision_frame = -VISION_INTERVAL
+    last_trace_frame = -TRACE_INTERVAL
 
-        try:
-            future = executor.submit(policy.get_action, state)
-            action_string = future.result(timeout=0.5)
-        except concurrent.futures.TimeoutError:
-            if verbose:
-                print("Policy timed out (infinite loop?)")
-            action_string = ""
-            done = True
-            break
-        except Exception as e:
-            if verbose:
-                print(f"Policy threw exception: {e}")
-            action_string = "RIGHT"
+    # Proactive vision polling tags the upcoming hazard every VISION_INTERVAL
+    # frames. It is a slow model call, so it runs single-flight on a background
+    # thread. Disable it (SONIC_PROACTIVE_VISION=0) when the vision model shares
+    # an endpoint with the code model: the polls would compete for the same local
+    # model and rarely finish before a fast headless eval ends. The death-frame
+    # analysis on a fatal failure is unaffected either way.
+    proactive_vision = os.environ.get("SONIC_PROACTIVE_VISION", "1") != "0"
 
-        if not isinstance(action_string, str):
-            action_string = "RIGHT"
-        
-        # Record rich trace every 30 frames (0.5 seconds at 60fps).
-        if frames_alive % 30 == 0:
-            trace.append(build_trace_entry(frames_alive, state, action_string))
+    runner = PolicyRunner(policy)
+    vision_executor = (
+        concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision")
+        if proactive_vision else None
+    )
+    vision_future = None
 
-        buttons = ['B', 'A', 'MODE', 'START', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'C', 'Y', 'X', 'Z']
-        action = [0] * 12
-        for p in action_string.split(','):
-            if p.strip() in buttons:
-                action[buttons.index(p.strip())] = 1
-        
-        for _ in range(action_repeat):
-            if done or frames_alive >= max_frames:
+    try:
+        while not done and frames_alive < max_frames:
+            state = env.get_state()
+            state_completion_x = state.get("screen_x_end") or state.get("completion_x")
+            if state_completion_x:
+                completion_x = state_completion_x
+
+            # Detect a level transition: when (zone, act) changes the game has
+            # advanced to the next act, so bank the cleared level's distance and
+            # reset per-level progress (otherwise the x-reset to ~0 would look
+            # like Sonic getting stuck).
+            zone_act = (state.get("zone"), state.get("act"))
+            if prev_zone_act is not None and zone_act != prev_zone_act:
+                # max_x here is the cleared act's true furthest point; bank it.
+                cumulative_distance += max_x
+                levels_cleared += 1
+                stuck_counter = 0
+                # Re-baseline over the next few frames (x is still mid-reset).
+                settle_frames_left = LEVEL_SETTLE_FRAMES
+                if verbose:
+                    print(f"Level cleared! Entering zone {zone_act[0]} act {zone_act[1]} (total cleared: {levels_cleared})")
+            prev_zone_act = zone_act
+
+            if proactive_vision:
+                # Pick up the most recent finished vision result without blocking.
+                if vision_future is not None and vision_future.done():
+                    try:
+                        current_vision_context = vision_future.result()
+                    except Exception:
+                        current_vision_context = "UNKNOWN"
+                    vision_future = None
+
+                # Kick off the next proactive vision poll in the background.
+                if frames_alive - last_vision_frame >= VISION_INTERVAL and vision_future is None:
+                    last_vision_frame = frames_alive
+                    slot = vision_poll_count % CONTEXT_SCREENSHOT_SLOTS
+                    vision_poll_count += 1
+                    context_path = f"artifacts/failures/context_slot{slot}.png"
+                    shot = capture_screenshot(env, context_path)
+                    if shot:
+                        context_screenshots.append(shot)
+                        context_screenshots = context_screenshots[-CONTEXT_SCREENSHOT_SLOTS:]
+                        vision_future = vision_executor.submit(mutator.analyze_environment, shot)
+
+            state['vision_context'] = current_vision_context
+
+            try:
+                action_string = runner.get_action(state, timeout=0.5)
+            except PolicyTimeout:
+                if verbose:
+                    print("Policy timed out (infinite loop?)")
+                action_string = ""
+                done = True
+                # "timeout" keyword routes this to the local code model (it is a
+                # code bug, not a visual hazard) and triggers lesson extraction.
+                failure_reason = "Policy code timeout (likely an infinite loop in get_action)."
                 break
-            obs, reward, done, info = env.step(action)
-            frames_alive += 1
-        
-        current_x = state.get('x_pos', 0)
-        if current_x > max_x:
-            max_x = current_x
-            stuck_counter = 0
-        else:
-            stuck_counter += 1
+            except Exception as e:
+                if verbose:
+                    print(f"Policy threw exception: {e}")
+                action_string = "RIGHT"
 
-        if stuck_counter > 500:
-            if verbose:
-                print("Sonic got stuck! Terminating run.")
-            done = True
-            failure_reason = "Sonic stopped making forward progress for 8 seconds."
-            break
-            
+            if not isinstance(action_string, str):
+                action_string = "RIGHT"
+
+            # Record a rich trace entry at a fixed frame cadence.
+            if frames_alive - last_trace_frame >= TRACE_INTERVAL:
+                last_trace_frame = frames_alive
+                trace.append(build_trace_entry(frames_alive, state, action_string))
+
+            action = action_string_to_array(action_string)
+
+            for _ in range(action_repeat):
+                if done or frames_alive >= max_frames:
+                    break
+                obs, reward, done, info = env.step(action)
+                frames_alive += 1
+
+            current_x = state.get('x_pos', 0)
+            if settle_frames_left > 0:
+                # Just transitioned to a new act; follow the live x down to its
+                # reset value and don't count stuck while it settles.
+                settle_frames_left -= 1
+                max_x = current_x
+                stuck_counter = 0
+            elif current_x > max_x:
+                max_x = current_x
+                stuck_counter = 0
+            elif state.get('level_end_bonus'):
+                # End-of-level tally is playing (Sonic ran off-screen); the x
+                # plateau here is success, not being stuck.
+                stuck_counter = 0
+            else:
+                stuck_counter += action_repeat
+
+            if stuck_counter > STUCK_FRAME_LIMIT:
+                if verbose:
+                    print("Sonic got stuck! Terminating run.")
+                done = True
+                level_suffix = ""
+                if zone_act and zone_act[0] is not None:
+                    level_suffix = f" (zone {zone_act[0]} act {zone_act[1]})"
+                # "stuck" keyword routes this to the local code model (a physics/
+                # logic bug) and triggers lesson extraction.
+                failure_reason = "Sonic got stuck: stopped making forward progress for 8 seconds." + level_suffix
+                break
+    finally:
+        runner.close()
+        if vision_executor is not None:
+            vision_executor.shutdown(wait=False)
+
     if failure_reason is not None:
         pass
     elif frames_alive >= max_frames:
@@ -168,9 +384,7 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
         failure_reason = "Unknown early termination."
     else:
         failure_reason = "Sonic lost a life or hit a fatal obstacle."
-        
-    executor.shutdown(wait=False)
-    
+
     if completion_x:
         fitness, components = calculate_fitness(
             max_x,
@@ -178,9 +392,18 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
             state.get('rings', 0),
             state.get('score', 0),
             completion_x=completion_x,
+            levels_cleared=levels_cleared,
+            cumulative_distance=cumulative_distance,
         )
     else:
-        fitness, components = calculate_fitness(max_x, frames_alive, state.get('rings', 0), state.get('score', 0))
+        fitness, components = calculate_fitness(
+            max_x,
+            frames_alive,
+            state.get('rings', 0),
+            state.get('score', 0),
+            levels_cleared=levels_cleared,
+            cumulative_distance=cumulative_distance,
+        )
 
     screenshot_path = capture_screenshot(env)
     montage_path = build_screenshot_montage(
@@ -189,12 +412,10 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
     )
     if montage_path:
         screenshot_path = montage_path
-    
+
     return fitness, frames_alive, max_x, failure_reason, screenshot_path, trace[-10:], components
 
 def policy_action_signature(code):
-    import re
-
     actions = set()
     for match in re.finditer(r"return\s+['\"]([^'\"]*)['\"]", code):
         actions.add(match.group(1).strip() or "NOOP")
@@ -214,9 +435,6 @@ def parse_pool_fitness(path):
 
 
 def update_pool(code, fitness, pool_dir="policies/pool", max_size=6):
-    import glob
-    import hashlib
-
     os.makedirs(pool_dir, exist_ok=True)
     code_hash = hashlib.sha1(code.encode("utf-8")).hexdigest()[:8]
     new_path = os.path.join(pool_dir, f"pool_{fitness:.2f}_{code_hash}.py")
@@ -260,10 +478,98 @@ def update_pool(code, fitness, pool_dir="policies/pool", max_size=6):
             except OSError:
                 pass
 
-def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, stagnation_limit=5, action_repeat=1):
+
+def load_pool_codes(pool_dir="policies/pool"):
+    """Read every policy currently in the FunSearch population pool."""
+    codes = []
+    for pf in glob.glob(os.path.join(pool_dir, "pool_*.py")):
+        try:
+            with open(pf, "r") as f:
+                codes.append(f.read())
+        except OSError:
+            pass
+    return codes
+
+
+def generate_candidates(
+    mutator,
+    working_code,
+    last_failure_reason,
+    last_screenshot,
+    recent_history,
+    last_trace,
+    n_candidates,
+    pool_codes,
+    crossover_probability=0.30,
+    parent_selector=None,
+):
+    """Request ``n_candidates`` new policies from the mutator.
+
+    Most are mutations of the working policy; when the pool is large enough a
+    fraction become FunSearch crossovers of two pooled parents. Returns a list
+    of ``(code, reasoning)`` tuples. A request that errors falls back to the
+    working policy so every slot is filled.
+    """
+    candidates_code = [None] * n_candidates
+    # max_workers=1 serialises requests so we never hammer a local LLM that
+    # cannot service concurrent completions.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        futures = {}
+        for c in range(n_candidates):
+            parent_pair = None
+            can_attempt_crossover = parent_selector is not None or len(pool_codes) >= 2
+            if can_attempt_crossover and random.random() < crossover_probability:
+                print(f"Requesting Crossover {c+1}/{n_candidates} (FunSearch)...")
+                if parent_selector is not None:
+                    try:
+                        parent_pair = parent_selector()
+                    except Exception as e:
+                        print(f"Population parent selection failed: {e}")
+                if parent_pair is None and len(pool_codes) >= 2:
+                    parent_pair = random.sample(pool_codes, 2)
+
+            if parent_pair is not None:
+                future = executor.submit(
+                    mutator.crossover_policies,
+                    parent_pair[0],
+                    parent_pair[1],
+                    recent_history,
+                    temperature=0.7,
+                )
+            else:
+                temperature = 0.7 if c == 0 else 0.9
+                print(f"Requesting Mutation {c+1}/{n_candidates} (Temp: {temperature})...")
+                future = executor.submit(
+                    mutator.mutate_policy,
+                    working_code,
+                    last_failure_reason,
+                    last_screenshot,
+                    recent_history,
+                    temperature,
+                    last_trace,
+                )
+            futures[future] = c
+
+        for future in concurrent.futures.as_completed(futures):
+            c = futures[future]
+            try:
+                new_code, reasoning = future.result()
+                candidates_code[c] = (new_code, reasoning)
+                print(f"Mutation {c+1} received.")
+            except Exception as e:
+                print(f"Mutation {c+1} failed: {e}")
+                candidates_code[c] = (working_code, f"Failed: {e}")
+    return candidates_code
+
+
+def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, stagnation_limit=5, action_repeat=1):
+    # max_frames now spans several acts (~3-4k frames each) so a strong policy
+    # can play through. Weak candidates still terminate early via stuck-detection,
+    # so the larger budget only costs wall-clock for genuinely good runs.
     history = EvolutionHistory()
     mutator = MutatorClient()
-    
+    population = PopulationArchive()
+
     try:
         from emulator.sonic_env import SonicEnvWrapper
         os.makedirs("artifacts/videos/tmp", exist_ok=True)
@@ -274,21 +580,19 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
 
     champion_path = os.path.join("policies", "champion_policy.py")
     working_path = os.path.join("policies", "working_policy.py")
-    
+
     if not os.path.exists(champion_path):
         print("Creating initial seed policy.")
         mutator.write_seed_policy(champion_path)
-        
+
     if not os.path.exists(working_path):
-        import shutil
         shutil.copy(champion_path, working_path)
-        
+
     all_time_champion_fitness = -1.0
     start_gen = 1
     history_file = "artifacts/history.json"
     if os.path.exists(history_file):
         try:
-            import json
             with open(history_file, "r") as f:
                 hist_data = json.load(f)
                 if hist_data:
@@ -296,25 +600,30 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
                     start_gen = hist_data[-1].get('generation', 0) + 1
         except Exception as e:
             print(f"Failed to load history for fitness: {e}")
-            
+
     stagnation_counter = 0
     baseline_context = evaluate_working_baseline(env, working_path, mutator, max_frames, action_repeat=action_repeat)
     working_fitness = baseline_context["working_fitness"]
     last_failure_reason = baseline_context["last_failure_reason"]
     last_trace = baseline_context["last_trace"]
     last_screenshot = baseline_context["last_screenshot"]
+    seed_population_baseline(population, working_path, baseline_context)
 
     for gen in range(start_gen, max_generations + 1):
         print(f"\n--- Generation {gen} ---")
-        
+
         if stagnation_counter >= stagnation_limit:
-            print(f"Stagnation detected ({stagnation_counter} gens without improvement). Triggering blankRestart!")
-            mutator.write_seed_policy(working_path)
-            working_fitness = -1.0
+            print(
+                f"Stagnation detected ({stagnation_counter} gens without improvement). "
+                "Keeping the working champion and requesting a distinct strategy."
+            )
+            escape = build_stagnation_escape_context(working_fitness, last_trace, last_screenshot)
+            working_fitness = escape["working_fitness"]
+            last_failure_reason = escape["last_failure_reason"]
+            last_trace = escape["last_trace"]
+            last_screenshot = escape["last_screenshot"]
             stagnation_counter = 0
-            last_failure_reason = "blankRestart due to stagnation"
-            last_trace = []
-        
+
         with open(working_path, 'r') as f:
             working_code = f.read()
 
@@ -328,71 +637,38 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
         best_candidate_idx = -1
 
         # Generate candidates
-        candidates_code = [None] * n_candidates
         recent_history = history.get_recent_history(3)
-        
-        import glob
-        import random
-        pool_files = glob.glob("policies/pool/pool_*.py")
-        pool_codes = []
-        for pf in pool_files:
-            with open(pf, "r") as f:
-                pool_codes.append(f.read())
-        
-        import concurrent.futures
-        # Ensure max_workers=1 to prevent hammering local LLMs that don't support concurrency
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            futures = {}
-            for c in range(n_candidates):
-                if len(pool_codes) >= 2 and random.random() < 0.30:
-                    print(f"Requesting Crossover {c+1}/{n_candidates} (FunSearch)...")
-                    parent_a, parent_b = random.sample(pool_codes, 2)
-                    future = executor.submit(
-                        mutator.crossover_policies,
-                        parent_a,
-                        parent_b,
-                        recent_history,
-                        temperature=0.7
-                    )
-                else:
-                    temperature = 0.7 if c == 0 else 0.9
-                    print(f"Requesting Mutation {c+1}/{n_candidates} (Temp: {temperature})...")
-                    future = executor.submit(
-                        mutator.mutate_policy,
-                        working_code, 
-                        last_failure_reason, 
-                        last_screenshot, 
-                        recent_history, 
-                        temperature, 
-                        last_trace
-                    )
-                futures[future] = c
-                
-            for future in concurrent.futures.as_completed(futures):
-                c = futures[future]
-                try:
-                    new_code, reasoning = future.result()
-                    candidates_code[c] = (new_code, reasoning)
-                    print(f"Mutation {c+1} received.")
-                except Exception as e:
-                    print(f"Mutation {c+1} failed: {e}")
-                    candidates_code[c] = (working_code, f"Failed: {e}")
-            
+        pool_codes = load_pool_codes()
+        candidates_code = generate_candidates(
+            mutator,
+            working_code,
+            last_failure_reason,
+            last_screenshot,
+            recent_history,
+            last_trace,
+            n_candidates,
+            pool_codes,
+            parent_selector=population.select_parent_codes,
+        )
+
         # Evaluate candidates
         for c, (new_code, reasoning) in enumerate(candidates_code):
             print(f"\nEvaluating Candidate {c+1}...")
             candidate_path = os.path.join("policies", f"candidate_{c}.py")
             clear_candidate_recording("artifacts/videos/tmp", c)
-            with open(candidate_path, 'w') as f:
-                f.write(new_code)
-
-            load_error = None
-            try:
-                policy = load_policy(candidate_path)
-            except Exception as e:
-                print(f"Failed to load policy (SyntaxError?): {e}")
-                load_error = e
-                policy = None
+            prepared = prepare_candidate_policy(
+                candidate_path,
+                new_code,
+                reasoning,
+                mutator,
+                population,
+            )
+            new_code = prepared["code"]
+            reasoning = prepared["reasoning"]
+            policy = prepared["policy"]
+            load_error = prepared["load_error"]
+            if load_error is not None:
+                print(f"Failed to load policy after one repair attempt: {load_error}")
 
             if env is None:
                 fitness = 0.0
@@ -411,14 +687,13 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
                     action_repeat=action_repeat,
                 )
                 print(f"Candidate {c+1} Fitness: {fitness:.2f} (Max X: {max_x}, Frames: {frames_alive})")
-                
+
                 # Flush the bk2 video buffer to disk (stable-retro only flushes on reset)
                 try:
                     env.reset()
                 except Exception:
                     pass
-                
-                import glob
+
                 bk2_files = glob.glob("artifacts/videos/tmp/*.bk2")
                 if bk2_files:
                     latest_bk2 = max(bk2_files, key=os.path.getmtime)
@@ -427,7 +702,17 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
                         os.remove(candidate_bk2_path)
                     if candidate_bk2_path != latest_bk2:
                         os.rename(latest_bk2, candidate_bk2_path)
-                
+
+            record_candidate_evaluation(
+                population,
+                new_code,
+                fitness,
+                components,
+                failure_reason,
+                trace,
+                reasoning,
+            )
+
             if fitness > best_candidate_fitness:
                 best_candidate_fitness = fitness
                 best_candidate_code = new_code
@@ -437,14 +722,13 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
                 best_candidate_trace = trace
                 best_candidate_components = components
                 best_candidate_idx = c
-                
+
         # Promote or Stagnate
         best_bk2 = f"artifacts/videos/tmp/candidate_{best_candidate_idx}.bk2"
         latest_mp4 = "artifacts/videos/latest.mp4"
-        
+
         if os.path.exists(best_bk2):
-            import subprocess
-            print(f"Rendering video for generation's best candidate...")
+            print("Rendering video for generation's best candidate...")
             try:
                 subprocess.Popen([sys.executable, "render_video.py", best_bk2, latest_mp4], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
@@ -454,18 +738,18 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
             print(f"Working policy improved from {working_fitness:.2f} -> {best_candidate_fitness:.2f}")
             working_fitness = best_candidate_fitness
             stagnation_counter = 0
-            
+
             # Update working file
             with open(working_path, 'w') as f:
                 f.write(best_candidate_code)
-                
+
             # Update the FunSearch genetic population pool
             update_pool(best_candidate_code, best_candidate_fitness)
-                
+
             if best_candidate_fitness > all_time_champion_fitness:
                 print(f"NEW ALL-TIME CHAMPION! {all_time_champion_fitness:.2f} -> {best_candidate_fitness:.2f}")
                 all_time_champion_fitness = best_candidate_fitness
-                
+
                 # Extract and save skills (Voyager Skill Library feature)
                 print("Extracting new skills from this champion policy...")
                 try:
@@ -477,33 +761,32 @@ def run_evaluation_loop(max_generations=500, max_frames=5000, n_candidates=2, st
                 champion_mp4 = "artifacts/videos/champion.mp4"
                 if os.path.exists(latest_mp4):
                     try:
-                        import shutil
                         if os.path.exists(champion_mp4):
                             os.remove(champion_mp4)
                         shutil.copy(latest_mp4, champion_mp4)
                     except Exception as e:
                         print(f"Failed to copy champion video: {e}")
-                
+
                 # Update all-time champion file
                 with open(champion_path, 'w') as f:
                     f.write(best_candidate_code)
-            
+
             # Archive the winning candidate
             history.log_generation(gen, working_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
         else:
             print(f"No candidate beat the working policy ({working_fitness:.2f}). Stagnation counter: {stagnation_counter + 1}")
             stagnation_counter += 1
-            
+
             if "fatal" in best_candidate_reason.lower() or "stuck" in best_candidate_reason.lower() or "timeout" in best_candidate_reason.lower():
                 print("Extracting a lesson learned from this failure...")
                 try:
                     mutator.extract_lesson(best_candidate_reason, best_candidate_trace)
                 except Exception as e:
                     print(f"Failed to extract lesson: {e}")
-            
+
             # We log the generation even if it failed so the dashboard updates
             history.log_generation(gen, working_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
-            
+
         last_failure_reason = best_candidate_reason
         last_trace = best_candidate_trace
         last_screenshot = best_candidate_screenshot

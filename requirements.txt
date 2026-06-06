@@ -1,10 +1,25 @@
-gym-retro
+# Core runtime dependencies for the evolutionary training loop (python main.py).
+# Target interpreter: CPython 3.8 (see README "Setup").
+#
+# Install:  pip install -r requirements.txt
+# Dashboard extras:        pip install -r requirements-dashboard.txt
+# Tests / linting:         pip install -r requirements-dev.txt
 
-gym
-numpy
-opencv-python
+# --- Retro emulator backend -------------------------------------------------
+# gym-retro is the safe default on Windows / Python 3.8 because stable-retro
+# does not publish a Windows 3.8 wheel. On Linux / WSL prefer stable-retro,
+# which the runtime auto-detects (SONIC_RETRO_BACKEND=auto):
+#     pip install stable-retro
+gym-retro>=0.8.0
 
-pydantic
-requests
-openai
-tenacity
+# --- Numeric / vision -------------------------------------------------------
+numpy>=1.21,<2.0          # numpy 2.0 requires Python >= 3.9
+opencv-python>=4.5,<5.0
+
+# --- LLM client -------------------------------------------------------------
+openai>=1.0,<2.0          # code uses the 1.x client (OpenAI(), chat.completions)
+tenacity>=8.0
+
+# --- Optional: emulator MCP server (emulator/mcp_server.py) -----------------
+# Not needed for training or tests. Install on demand:
+#     pip install "mcp[cli]>=1.0"

@@ -1,7 +1,7 @@
 import importlib
-import cv2
 import os
 
+import cv2
 
 DEFAULT_GAME = "SonicTheHedgehog-Genesis"
 DEFAULT_STATE = "GreenHillZone.Act1"
@@ -107,18 +107,18 @@ class SonicEnvWrapper:
         """Returns the current relevant RAM values as a dict."""
         current_x = self.info.get('x', 0)
         current_y = self.info.get('y', 0)
-        
+
         # Calculate velocity if previous state exists
         if not hasattr(self, 'last_x'):
             self.last_x = current_x
             self.last_y = current_y
-            
+
         x_vel = current_x - self.last_x
         y_vel = current_y - self.last_y
-        
+
         self.last_x = current_x
         self.last_y = current_y
-        
+
         return {
             "x_pos": current_x,
             "y_pos": current_y,
@@ -129,7 +129,12 @@ class SonicEnvWrapper:
             "screen_x_end": self.info.get('screen_x_end', 0),
             "rings": self.info.get('rings', 0),
             "lives": self.info.get('lives', 3),
-            "score": self.info.get('score', 0)
+            "score": self.info.get('score', 0),
+            # Level identity, so the policy can branch per zone/act and the
+            # runner can detect when a level has been cleared.
+            "zone": self.info.get('zone', 0),
+            "act": self.info.get('act', 0),
+            "level_end_bonus": self.info.get('level_end_bonus', 0),
         }
 
     def close(self):

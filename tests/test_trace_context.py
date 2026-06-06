@@ -1,16 +1,23 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
-from unittest.mock import patch
 
 import core.trace_context as trace_context
-from core.trace_context import build_screenshot_montage
+from core.trace_context import build_screenshot_montage, build_trace_entry
 
 
 class TraceContextTests(unittest.TestCase):
+    def test_build_trace_entry_includes_zone_and_act(self):
+        entry = build_trace_entry(30, {"x_pos": 5, "y_pos": 9, "zone": 2, "act": 1}, "RIGHT")
+        self.assertEqual(entry["zone"], 2)
+        self.assertEqual(entry["act"], 1)
+        self.assertEqual(entry["x"], 5)
+        self.assertEqual(entry["action"], "RIGHT")
+
     def test_build_screenshot_montage_combines_recent_frames(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             paths = []

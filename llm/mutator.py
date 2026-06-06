@@ -1,10 +1,14 @@
-import os
 import base64
 import json
+import mimetypes
+import os
+import re
+
+from openai import OpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from core.trace_context import trace_entry_x
 from llm.prompts import SYSTEM_PROMPT
-from openai import OpenAI
-from tenacity import retry, wait_exponential, stop_after_attempt
 
 
 def extract_json_object(text):
@@ -103,6 +107,37 @@ def normalize_vision_context(content):
     return normalized or "UNKNOWN"
 
 
+def message_text(message):
+    """Return a model message's text, falling back to ``reasoning_content``.
+
+    Reasoning models (e.g. gemma, qwen3) routinely leave ``content`` empty and
+    place their output in ``reasoning_content``. The micro path already handled
+    this; this helper lets the macro/vision paths do the same.
+    """
+    content = (getattr(message, "content", "") or "").strip()
+    if content:
+        return content
+    return (getattr(message, "reasoning_content", "") or "").strip()
+
+
+_VISION_STOPWORDS = {
+    "OR", "AND", "THE", "A", "AN", "IS", "ARE", "WITH", "OF", "TO", "IN", "ON",
+    "NO", "SONIC", "AHEAD", "IMMEDIATE", "CONTEXT", "HAZARD",
+}
+
+
+def concise_vision_label(text, max_words=2):
+    """Collapse a (possibly verbose, reasoning-style) reply to a short tag.
+
+    Reasoning models often conclude with the answer, so we keep the trailing
+    meaningful words and drop connector/filler tokens.
+    """
+    words = re.findall(r"[A-Za-z]+", text or "")
+    meaningful = [w for w in words if w.upper() not in _VISION_STOPWORDS]
+    picks = (meaningful or words)[-max_words:]
+    return normalize_vision_context(" ".join(picks)) if picks else "UNKNOWN"
+
+
 class MutatorClient:
     def __init__(self):
         # Cloud/Macro Model Config
@@ -110,11 +145,11 @@ class MutatorClient:
         # Default to Google's OpenAI-compatible endpoint if using Gemini directly
         self.macro_base_url = os.environ.get("MACRO_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
         self.macro_model = os.environ.get("MACRO_MODEL", "gemini-2.5-pro")
-        
+
         # Local/Micro Model Config
         self.micro_base_url = os.environ.get("MICRO_BASE_URL", "http://localhost:1234/v1")
         self.micro_model = os.environ.get("MICRO_MODEL", "local-model")
-        
+
         self.macro_client = OpenAI(api_key=self.macro_api_key, base_url=self.macro_base_url) if self.macro_api_key else None
         self.micro_client = OpenAI(api_key="not-needed", base_url=self.micro_base_url)
 
@@ -125,11 +160,11 @@ def get_action(state):
     # Basic Gen 0 Seed Policy
     # Always run right, jump occasionally
     action = "RIGHT"
-    
+
     # Try to jump if rings are 0 (maybe we hit something)
     if state.get('rings', 1) == 0:
         action += ",B"
-        
+
     return action
 """
         with open(filepath, 'w') as f:
@@ -139,21 +174,32 @@ def get_action(state):
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
 
-    def _call_macro_model(self, prompt, image_path):
+    def _image_data_url(self, image_path):
+        """Build a base64 data URL with the MIME type matching the file.
+
+        Screenshots are written as PNG, so hardcoding image/jpeg can be
+        rejected by stricter providers. Derive the type from the extension and
+        fall back to PNG.
+        """
+        mime_type, _ = mimetypes.guess_type(image_path)
+        mime_type = mime_type or "image/png"
+        return f"data:{mime_type};base64,{self._encode_image(image_path)}"
+
+    def _call_macro_model(self, prompt, image_path, temperature=0.7):
         """Calls Cloud LLM for Macro-Mutations (needs vision)."""
         if not image_path:
             print("No screenshot available, falling back to local Micro-Mutation model.")
-            return self._call_micro_model(prompt)
+            return self._call_micro_model(prompt, temperature)
         if not self.macro_client:
             print("No MACRO_API_KEY found, falling back to local Micro-Mutation model.")
-            return self._call_micro_model(prompt)
-            
+            return self._call_micro_model(prompt, temperature)
+
         print(f"Using Cloud API ({self.macro_model}) for Macro-Mutation.")
         try:
             return self._do_macro_call(prompt, image_path)
         except Exception as e:
             print(f"Cloud API failed after retries: {e}")
-            return self._call_micro_model(prompt)
+            return self._call_micro_model(prompt, temperature)
 
     @retry(
         wait=wait_exponential(multiplier=2, min=2, max=60),
@@ -161,8 +207,6 @@ def get_action(state):
         reraise=True
     )
     def _do_macro_call(self, prompt, image_path):
-        base64_image = self._encode_image(image_path)
-        
         response = self.macro_client.chat.completions.create(
             model=self.macro_model,
             messages=[
@@ -174,18 +218,24 @@ def get_action(state):
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
+                                "url": self._image_data_url(image_path)
                             }
                         }
                     ]
                 }
             ],
             temperature=0.7,
-            max_tokens=2048,
-            timeout=60
+            # Match the micro path: a reasoning vision model (e.g. gemma) spends
+            # tokens thinking before it emits code, so a small cap truncates the
+            # policy mid-output and the extracted fragment fails to parse.
+            max_tokens=8192,
+            timeout=300
         )
-        
-        return response.choices[0].message.content, "Cloud vision analysis completed."
+
+        text = message_text(response.choices[0].message)
+        if not text:
+            raise ValueError("Macro model returned empty content and reasoning.")
+        return text, "Cloud vision analysis completed."
 
 
     def _call_micro_model(self, prompt, temperature=0.7):
@@ -213,16 +263,10 @@ def get_action(state):
             max_tokens=8192,
             timeout=300
         )
-        content = response.choices[0].message.content or ""
-        reasoning_content = getattr(response.choices[0].message, "reasoning_content", "") or ""
-        
-        if not content.strip():
-            if reasoning_content.strip():
-                print("Content was empty, but reasoning_content found. Extracting from reasoning...")
-                content = reasoning_content
-            else:
-                raise ValueError("LLM returned an empty string and empty reasoning. Likely a concurrency/queue failure.")
-            
+        content = message_text(response.choices[0].message)
+        if not content:
+            raise ValueError("LLM returned an empty string and empty reasoning. Likely a concurrency/queue failure.")
+
         return content, "Local inference completed."
 
     def extract_lesson(self, failure_reason, coordinate_trace):
@@ -254,19 +298,18 @@ Return ONLY a valid JSON object in this exact format:
             json.dump(bank, f, indent=4)
         print(f"Extracted and saved semantic lesson: {lesson_data.get('lesson')}")
 
-    @retry(
-        wait=wait_exponential(multiplier=2, min=2, max=60),
-        stop=stop_after_attempt(3),
-        reraise=True
-    )
     def analyze_environment(self, image_path):
-        """Uses the Cloud VLM to proactively tag the current visual environment."""
+        """Uses the Cloud VLM to proactively tag the current visual environment.
+
+        Failures are swallowed and reported as "UNKNOWN" so the run continues,
+        which is why this is deliberately *not* wrapped in @retry: the except
+        block below would suppress every retry anyway.
+        """
         if not self.macro_client:
             return "UNKNOWN"
-            
-        base64_image = self._encode_image(image_path)
+
         prompt = "Analyze this screenshot from Sonic the Hedgehog. Reply with ONLY ONE or TWO WORDS describing the most immediate upcoming hazard or context directly in front of sonic (e.g. 'CLEAR', 'ENEMY', 'SPIKES', 'LOOP', 'PLATFORM', 'WALL')."
-        
+
         try:
             response = self.macro_client.chat.completions.create(
                 model=self.macro_model,
@@ -279,17 +322,17 @@ Return ONLY a valid JSON object in this exact format:
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                    "url": self._image_data_url(image_path)
                                 }
                             }
                         ]
                     }
                 ],
                 temperature=0.3,
-                max_tokens=10,
-                timeout=20
+                max_tokens=256,  # reasoning models need room to finish before answering
+                timeout=30
             )
-            return normalize_vision_context(response.choices[0].message.content)
+            return concise_vision_label(message_text(response.choices[0].message))
         except Exception as e:
             print(f"Proactive vision analysis failed: {e}")
             return "UNKNOWN"
@@ -363,7 +406,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
                         skills_text = "Available Skills (from `policies.skills`):\n```python\n" + skills_content + "\n```\nYou can import these via `import policies.skills as skills` and call them like `skills.my_func(state)`. Use them to construct `get_action(state)`."
             except Exception as e:
                 print(f"Error loading skills.py: {e}")
-        
+
         prompt = f"""
 Here is the current code that failed:
 ```python
@@ -382,20 +425,34 @@ Recent History of Failures:
 
 Note on Vision Context: The emulator now actively looks at the screen every 5 seconds. The immediate upcoming visual context is injected into `state['vision_context']` (e.g., 'ENEMY', 'CLEAR', 'SPIKES'). You can write logic to check this string!
 
-Analyze the failure and rewrite `get_action(state)`. 
+Analyze the failure and rewrite `get_action(state)`.
+
+CRITICAL — preserve progress: the current code already makes real progress before it
+fails. Keep its existing working logic and structure intact and change the SMALLEST
+amount needed to get past the specific failure shown above. Do NOT delete working
+rules or rewrite unrelated sections, or you will regress earlier progress.
+Note that `x_pos` resets to ~0 at the start of each act and `state['zone']`/`state['act']`
+tell you which act you are in — when handling a NEW act, prefer general
+velocity/vision-based logic over hardcoded x-coordinates (which only apply to one act).
+
 Return ONLY valid Python code, starting with `def get_action(state):`.
 
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
 """
-        
-        # Decide routing based on failure reason complexity
-        if "stuck" in failure_reason.lower() or "timeout" in failure_reason.lower() or not screenshot_path:
-            # Likely a physics/logic bug, local model can handle
+
+        # Route by failure type. A pure code fault (an infinite loop caught as a
+        # timeout), or having no frame to look at, goes to the local code model.
+        # Everything else -- Sonic stuck against level geometry, or killed by a
+        # hazard -- is a *visual* problem: the model needs to SEE the frame to
+        # understand what is blocking or killing it, so it goes to the vision
+        # (macro) model. (Earlier this also sent "stuck" to the blind code model,
+        # but a 30-generation run showed that left the model unable to get past
+        # unfamiliar geometry it could not see -- 0 vision calls, hard plateau.)
+        if "timeout" in failure_reason.lower() or not screenshot_path:
             raw_response, reasoning = self._call_micro_model(prompt, temperature)
         else:
-            # Fatal error, died to enemy/pit. Needs visual analysis.
-            raw_response, reasoning = self._call_macro_model(prompt, screenshot_path)
-            
+            raw_response, reasoning = self._call_macro_model(prompt, screenshot_path, temperature)
+
         # Clean up markdown if the LLM wrapped it anyway
         print(f"Raw Response from LLM (mutate): {repr(raw_response)}")
         if "```python" in raw_response:
@@ -403,12 +460,41 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         elif "```" in raw_response:
             parts = raw_response.split("```")
             raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
-            
+
+        return raw_response, reasoning
+
+    def repair_policy(self, candidate_code, validation_error):
+        """Use the local code model once to repair an exact validator failure."""
+        prompt = f"""
+The generated Sonic policy below failed deterministic preflight validation.
+
+Invalid candidate:
+```python
+{candidate_code}
+```
+
+Exact validator feedback:
+{validation_error}
+
+Repair ONLY the validation failure while preserving the candidate's intended
+behavior and structure. The result must define a top-level `get_action(state)`.
+Imports are forbidden except optional `import policies.skills as skills`.
+Do not use filesystem, process, network, dynamic-code-execution, or dunder APIs.
+
+Return ONLY valid Python code, starting with `def get_action(state):` or the
+optional allowed skills import followed by that function.
+"""
+        raw_response, reasoning = self._call_micro_model(prompt, temperature=0.2)
+        if "```python" in raw_response:
+            raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
+        elif "```" in raw_response:
+            parts = raw_response.split("```")
+            raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
         return raw_response, reasoning
 
     def crossover_policies(self, policy_a_code, policy_b_code, recent_history, temperature=0.7):
         history_text = json.dumps(recent_history, indent=2)
-        
+
         prompt = f"""
 We are performing an Evolutionary Algorithm Crossover. We have two highly successful policies (Parent A and Parent B) that each excel in different areas.
 
@@ -431,15 +517,15 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
 
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
 """
-        
+
         raw_response, reasoning = self._call_micro_model(prompt, temperature)
         reasoning = "FunSearch Crossover Offspring"
-        
+
         print(f"Raw Response from LLM (crossover): {repr(raw_response)}")
         if "```python" in raw_response:
             raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
         elif "```" in raw_response:
             parts = raw_response.split("```")
             raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
-            
+
         return raw_response, reasoning

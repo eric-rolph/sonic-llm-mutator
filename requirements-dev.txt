@@ -1,0 +1,10 @@
+# Test + lint dependencies. The unit tests stub the emulator with fakes and
+# import retro lazily, so the heavy gym-retro/stable-retro backend is NOT
+# required to run the suite. This keeps CI fast and reliable.
+#     pip install -r requirements-dev.txt
+#     python -m unittest discover -s tests
+numpy>=1.21,<2.0
+opencv-python-headless>=4.5,<5.0   # headless build: no system GUI libs needed on CI
+openai>=1.0,<2.0
+tenacity>=8.0
+ruff>=0.4

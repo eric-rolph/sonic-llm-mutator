@@ -6,6 +6,11 @@ venv/
 venv38/
 .env
 
+# Bootstrap / tooling that should never be committed
+get-pip.py
+.ruff_cache/
+.smoke_backup/
+
 # Project specific
 artifacts/
 policies/

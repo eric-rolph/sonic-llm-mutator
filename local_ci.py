@@ -1,6 +1,7 @@
-import subprocess
 import os
+import subprocess
 import sys
+
 
 def run_local_ci():
     """
@@ -8,15 +9,15 @@ def run_local_ci():
     In a real scenario, this would run on every 'Merge Request' created by the LLM.
     """
     print("=== Starting Local CI Pipeline ===")
-    
+
     # Check if the policy exists
     policy_path = os.path.join("policies", "current_policy.py")
     if not os.path.exists(policy_path):
         print("Error: No proposed policy found.")
         return False
-        
+
     print(f"Checking proposed policy exists: {policy_path}")
-    
+
     # A robust CI would also compare candidate fitness against the main branch.
     # The local smoke check stays bounded and dependency-light by running tests.
     try:
@@ -27,10 +28,10 @@ def run_local_ci():
             capture_output=True,
             text=True,
         )
-        
+
         print("--- CI Output ---")
         print(result.stdout)
-        
+
         if result.returncode == 0:
             print("=== Local CI Pipeline SUCCESS ===")
             return True

@@ -1,7 +1,10 @@
+import os
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from unittest import mock
 
+from core.evaluator import LEVEL_CLEARED_BONUS
 from main import evaluate_policy
 
 
@@ -150,6 +153,83 @@ class EvaluatePolicyTests(unittest.TestCase):
         self.assertEqual(frames, 5)
         self.assertEqual(policy.calls, 2)
         self.assertEqual(reason, "Timeout reached.")
+
+    def test_trace_cadence_not_skipped_by_misaligned_action_repeat(self):
+        # action_repeat=7 does not divide the 30-frame trace interval, so the
+        # old `frames_alive % 30 == 0` check recorded only the frame-0 entry.
+        # The elapsed-frame cadence must keep sampling throughout the run.
+        states = [
+            {"x_pos": index * 100, "y_pos": 100, "rings": 0, "score": 0}
+            for index in range(60)
+        ]
+        env = FakeEnv(states)
+
+        _, frames, _, _, _, trace, _ = self.evaluate_silently(
+            env,
+            max_frames=210,
+            action_repeat=7,
+        )
+
+        self.assertEqual(frames, 210)
+        self.assertGreaterEqual(len(trace), 3)
+        recorded_frames = [entry["frame"] for entry in trace]
+        self.assertEqual(recorded_frames, sorted(recorded_frames))
+
+    def test_context_screenshots_are_bounded_to_a_small_ring(self):
+        class RecordingShotEnv(FakeEnv):
+            def __init__(self, states):
+                super().__init__(states)
+                self.context_shots = []
+
+            def get_screenshot(self, filepath=None):
+                if filepath is not None:
+                    self.context_shots.append(filepath)
+                    return filepath
+                return "final.png"
+
+        # Long enough for several 300-frame vision polls.
+        states = [{"x_pos": i * 10, "y_pos": 100, "rings": 0, "score": 0} for i in range(1100)]
+        env = RecordingShotEnv(states)
+
+        self.evaluate_silently(env, max_frames=1000)
+
+        self.assertGreater(len(env.context_shots), 3)  # polled several times...
+        self.assertLessEqual(len(set(env.context_shots)), 3)  # ...but onto <=3 files
+        for path in env.context_shots:
+            self.assertRegex(path, r"context_slot[012]\.png$")
+
+    def test_proactive_vision_disabled_by_env_var(self):
+        class CountingVisionMutator:
+            def __init__(self):
+                self.calls = 0
+
+            def analyze_environment(self, screenshot_path):
+                self.calls += 1
+                return "CLEAR"
+
+        states = [{"x_pos": i, "y_pos": 100, "rings": 0, "score": 0} for i in range(400)]
+        env = FakeEnv(states)
+        mutator = CountingVisionMutator()
+
+        with mock.patch.dict(os.environ, {"SONIC_PROACTIVE_VISION": "0"}):
+            evaluate_policy(env, StaticPolicy(), mutator, max_frames=350, verbose=False)
+
+        self.assertEqual(mutator.calls, 0)  # no proactive polling when disabled
+
+    def test_level_transition_counts_clear_and_resets_progress(self):
+        # Act 0: x climbs to 1000. Then (zone, act) flips and x resets -- the old
+        # global-max stuck detector would have killed the run here.
+        act0 = [{"x_pos": (i + 1) * 100, "zone": 0, "act": 0, "rings": 0, "score": 0} for i in range(10)]
+        act1 = [{"x_pos": (i + 1) * 50, "zone": 0, "act": 1, "rings": 0, "score": 0} for i in range(10)]
+        env = FakeEnv(act0 + act1)
+
+        _, frames, max_x, reason, _, _, components = self.evaluate_silently(env, max_frames=20)
+
+        self.assertEqual(frames, 20)
+        self.assertEqual(reason, "Timeout reached.")  # not "stopped making forward progress"
+        self.assertEqual(components["levels_cleared"], 1)
+        self.assertEqual(components["levels"], LEVEL_CLEARED_BONUS)
+        self.assertEqual(max_x, 500)  # furthest in the *current* act, not the 1000 from act 0
 
 
 if __name__ == "__main__":

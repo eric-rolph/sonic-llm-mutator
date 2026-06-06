@@ -2,7 +2,15 @@ import os
 import tempfile
 import unittest
 
-from main import evaluate_working_baseline
+from main import build_stagnation_escape_context, evaluate_working_baseline, seed_population_baseline
+
+
+class RecordingArchive:
+    def __init__(self):
+        self.calls = []
+
+    def record_evaluation(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
 
 
 class NoVisionMutator:
@@ -63,6 +71,7 @@ class RunResumeTests(unittest.TestCase):
         self.assertEqual(context["last_trace"][-1]["x"], 100)
         self.assertEqual(context["last_trace"][-1]["y"], 100)
         self.assertEqual(context["last_trace"][-1]["action"], "RIGHT")
+        self.assertIn("distance", context["components"])
 
     def test_evaluate_working_baseline_handles_missing_policy(self):
         context = evaluate_working_baseline(
@@ -77,6 +86,35 @@ class RunResumeTests(unittest.TestCase):
         self.assertEqual(context["last_failure_reason"], "Initial seed run")
         self.assertIsNone(context["last_screenshot"])
         self.assertEqual(context["last_trace"], [])
+
+    def test_seed_population_baseline_records_the_strong_working_policy(self):
+        archive = RecordingArchive()
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = self.write_policy(tmp, "def get_action(state):\n    return 'RIGHT'\n")
+            recorded = seed_population_baseline(
+                archive,
+                policy_path,
+                {
+                    "working_fitness": 47977.37,
+                    "components": {"levels_cleared": 1},
+                    "last_failure_reason": "stuck in act 2",
+                    "last_trace": [{"zone": 0, "act": 1, "x": 1077}],
+                },
+            )
+
+        self.assertTrue(recorded)
+        self.assertEqual(archive.calls[0][1]["fitness"], 47977.37)
+        self.assertEqual(archive.calls[0][1]["components"]["levels_cleared"], 1)
+
+    def test_stagnation_escape_preserves_working_policy_context(self):
+        trace = [{"zone": 0, "act": 1, "x": 1077}]
+
+        context = build_stagnation_escape_context(47977.37, trace, "failure.png")
+
+        self.assertEqual(context["working_fitness"], 47977.37)
+        self.assertEqual(context["last_trace"], trace)
+        self.assertEqual(context["last_screenshot"], "failure.png")
+        self.assertIn("preserve", context["last_failure_reason"].lower())
 
 
 if __name__ == "__main__":

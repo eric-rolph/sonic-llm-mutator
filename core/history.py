@@ -3,6 +3,7 @@ import os
 import shutil
 import time
 
+
 class EvolutionHistory:
     def __init__(self, log_path="artifacts/history.json", archive_dir="policies/archive"):
         self.log_path = log_path
@@ -26,7 +27,7 @@ class EvolutionHistory:
         timestamp = int(time.time())
         archive_name = f"gen_{generation}_{timestamp}.py"
         archive_path = os.path.join(self.archive_dir, archive_name)
-        
+
         if os.path.exists(policy_file):
             shutil.copy2(policy_file, archive_path)
 
