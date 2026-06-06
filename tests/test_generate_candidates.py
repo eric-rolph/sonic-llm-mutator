@@ -58,6 +58,53 @@ class GenerateCandidatesTests(unittest.TestCase):
 
         self.assertIsNone(build_frontier_guard_candidate(working, moving))
 
+    def test_build_frontier_guard_candidate_does_not_shadow_overlapping_guard(self):
+        working = """def get_action(state):
+    # FRONTIER_GUARD zone=0 act=1 x=1077
+    if 1052 <= state.get("x_pos", 0) <= 1102:
+        return "RIGHT,B"
+    return "RIGHT,DOWN"
+"""
+        trace = [
+            {"zone": 0, "act": 1, "x": 1078, "x_velocity": 0.0, "action": "RIGHT,B"},
+            {"zone": 0, "act": 1, "x": 1078, "x_velocity": 0.0, "action": "RIGHT,B"},
+            {"zone": 0, "act": 1, "x": 1078, "x_velocity": 0.0, "action": "RIGHT,B"},
+        ]
+
+        self.assertIsNone(build_frontier_guard_candidate(working, trace))
+
+    def test_recent_failed_frontier_guard_is_not_retried_identically(self):
+        mutator = FakeMutator()
+        working = "def get_action(state):\n    return 'RIGHT,DOWN'\n"
+        trace = [
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+        ]
+        recent_history = [
+            {
+                "llm_reasoning": "Deterministic frontier guard",
+                "components": {
+                    "frontier_guard_markers": ["# FRONTIER_GUARD zone=0 act=1 x=1077"]
+                },
+            }
+        ]
+
+        result = generate_silently(
+            mutator,
+            working,
+            "reason",
+            None,
+            recent_history,
+            trace,
+            1,
+            [],
+            crossover_probability=0.0,
+        )
+
+        self.assertEqual(result, [("# mutation t=0.7", "mutated")])
+        self.assertEqual(mutator.mutate_calls, 1)
+
     def test_stationary_frontier_reserves_one_candidate_without_llm_rewrite(self):
         mutator = FakeMutator()
         working = "def get_action(state):\n    return 'RIGHT,DOWN'\n"

@@ -1,6 +1,11 @@
+import os
+import sys
+import tempfile
+import types
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from unittest.mock import patch
 
 from llm.mutator import (
     MutatorClient,
@@ -213,6 +218,136 @@ class MutatorMemoryTests(unittest.TestCase):
             mutator._call_macro_model("prompt", "shot.png", temperature=0.9)
 
         self.assertEqual(mutator.temperatures, [0.9])
+
+    def test_macro_request_preserves_requested_mutation_temperature(self):
+        mutator = object.__new__(MutatorClient)
+        mutator.macro_client = object()
+        mutator.macro_model = "vision-model"
+        captured = []
+
+        def do_macro_call(prompt, image_path, temperature):
+            captured.append(temperature)
+            return "code", "reasoning"
+
+        mutator._do_macro_call = do_macro_call
+
+        result = mutator._call_macro_model("prompt", "shot.png", temperature=0.9)
+
+        self.assertEqual(result, ("code", "reasoning"))
+        self.assertEqual(captured, [0.9])
+
+    def test_extract_and_save_skills_rejects_unsafe_code_before_writing(self):
+        class UnsafeSkillsMutator(MutatorClient):
+            def __init__(self):
+                pass
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                return "def unsafe(state):\n    writer = open\n    return writer('owned.txt', 'w')", "local"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                os.makedirs("policies")
+                with open("policies/skills.py", "w", encoding="utf-8") as f:
+                    f.write("def existing(state):\n    return 'RIGHT'\n")
+
+                with redirect_stdout(StringIO()):
+                    UnsafeSkillsMutator().extract_and_save_skills("def get_action(state):\n    return 'RIGHT'")
+
+                with open("policies/skills.py", "r", encoding="utf-8") as f:
+                    self.assertEqual(f.read(), "def existing(state):\n    return 'RIGHT'\n")
+                self.assertFalse(os.path.exists("owned.txt"))
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_extract_and_save_skills_reloads_loaded_module_after_valid_update(self):
+        class SafeSkillsMutator(MutatorClient):
+            def __init__(self):
+                pass
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                return "def updated(state):\n    return 'RIGHT,B'", "local"
+
+        loaded_skills = types.ModuleType("policies.skills")
+        previous_module = sys.modules.get("policies.skills")
+        sys.modules["policies.skills"] = loaded_skills
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                previous_cwd = os.getcwd()
+                os.chdir(tmp)
+                try:
+                    os.makedirs("policies")
+                    with patch("llm.mutator.importlib.reload") as reload_module:
+                        with redirect_stdout(StringIO()):
+                            SafeSkillsMutator().extract_and_save_skills(
+                                "def get_action(state):\n    return 'RIGHT'"
+                            )
+
+                    reload_module.assert_called_once_with(loaded_skills)
+                    with open("policies/skills.py", "r", encoding="utf-8") as f:
+                        self.assertIn("def updated(state):", f.read())
+                finally:
+                    os.chdir(previous_cwd)
+        finally:
+            if previous_module is None:
+                sys.modules.pop("policies.skills", None)
+            else:
+                sys.modules["policies.skills"] = previous_module
+
+    def test_extract_and_save_skills_preserves_existing_skill_functions(self):
+        class DroppingSkillsMutator(MutatorClient):
+            def __init__(self):
+                pass
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                return "def replacement(state):\n    return 'RIGHT'", "local"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                os.makedirs("policies")
+                existing = "def existing(state):\n    return 'RIGHT,B'\n"
+                with open("policies/skills.py", "w", encoding="utf-8") as f:
+                    f.write(existing)
+
+                with redirect_stdout(StringIO()):
+                    DroppingSkillsMutator().extract_and_save_skills(
+                        "def get_action(state):\n    return 'RIGHT'"
+                    )
+
+                with open("policies/skills.py", "r", encoding="utf-8") as f:
+                    self.assertEqual(f.read(), existing)
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_extract_and_save_skills_does_not_change_existing_skill_behavior(self):
+        class RewritingSkillsMutator(MutatorClient):
+            def __init__(self):
+                pass
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                return "def existing(state):\n    return 'LEFT'", "local"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                os.makedirs("policies")
+                existing = "def existing(state):\n    return 'RIGHT,B'\n"
+                with open("policies/skills.py", "w", encoding="utf-8") as f:
+                    f.write(existing)
+
+                with redirect_stdout(StringIO()):
+                    RewritingSkillsMutator().extract_and_save_skills(
+                        "def get_action(state):\n    return 'RIGHT'"
+                    )
+
+                with open("policies/skills.py", "r", encoding="utf-8") as f:
+                    self.assertEqual(f.read(), existing)
+            finally:
+                os.chdir(previous_cwd)
 
 
 if __name__ == "__main__":

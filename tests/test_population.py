@@ -122,6 +122,38 @@ class PopulationArchiveTests(unittest.TestCase):
         self.assertNotEqual(parent_a, parent_b)
         self.assertEqual(sum(record["selection_visits"] for record in records), 2)
 
+    def test_select_parent_codes_skips_invalid_and_missing_elites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = PopulationArchive(tmp)
+            invalid = archive.record_evaluation("not valid python", fitness=400.0)
+            missing = archive.record_evaluation(policy_returning("LEFT"), fitness=300.0)
+            valid_a = archive.record_evaluation(policy_returning("RIGHT"), fitness=200.0)
+            valid_b = archive.record_evaluation(policy_returning("RIGHT,B"), fitness=100.0)
+            (Path(tmp) / missing["code_path"]).unlink()
+
+            parents = archive.select_parent_codes(rng=random.Random(7), elite_limit=2)
+            records = archive.load_records()
+
+        self.assertIsNotNone(parents)
+        self.assertEqual(set(parents), {policy_returning("RIGHT"), policy_returning("RIGHT,B")})
+        visits = {record["policy_id"]: record["selection_visits"] for record in records}
+        self.assertEqual(visits[invalid["policy_id"]], 0)
+        self.assertEqual(visits[missing["policy_id"]], 0)
+        self.assertEqual(visits[valid_a["policy_id"]], 1)
+        self.assertEqual(visits[valid_b["policy_id"]], 1)
+
+    def test_select_parent_codes_does_not_record_visits_without_two_valid_parents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = PopulationArchive(tmp)
+            archive.record_evaluation("not valid python", fitness=300.0)
+            archive.record_evaluation(policy_returning("RIGHT"), fitness=200.0)
+
+            parents = archive.select_parent_codes(rng=random.Random(7))
+            records = archive.load_records()
+
+        self.assertIsNone(parents)
+        self.assertEqual(sum(record["selection_visits"] for record in records), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

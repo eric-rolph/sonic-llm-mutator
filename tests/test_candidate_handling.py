@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from main import (
+    atomic_write_text,
     build_policy_load_failure,
     clear_candidate_recording,
     load_policy,
@@ -36,6 +37,21 @@ class RepairingMutator:
 
 
 class CandidateHandlingTests(unittest.TestCase):
+    def test_atomic_write_text_supports_unicode_and_replaces_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "policy.py")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("old")
+
+            atomic_write_text(path, "# café\ndef get_action(state):\n    return 'RIGHT'\n")
+
+            with open(path, "r", encoding="utf-8") as f:
+                self.assertEqual(
+                    f.read(),
+                    "# café\ndef get_action(state):\n    return 'RIGHT'\n",
+                )
+            self.assertEqual(os.listdir(tmp), ["policy.py"])
+
     def test_build_policy_load_failure_uses_specific_reason(self):
         fitness, frames, max_x, reason, screenshot, trace, components = build_policy_load_failure(
             SyntaxError("bad syntax")
@@ -106,6 +122,41 @@ class CandidateHandlingTests(unittest.TestCase):
                 load_policy(policy_path)
 
             self.assertFalse(os.path.exists(marker_path))
+
+    def test_loaded_policy_runs_with_restricted_builtins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = os.path.join(tmp, "candidate.py")
+            marker_path = os.path.join(tmp, "owned.txt")
+            source = (
+                "def get_action(state):\n"
+                "    builtins_key = '_' + '_' + 'builtins' + '_' + '_'\n"
+                "    open_key = 'op' + 'en'\n"
+                f"    globals()[builtins_key][open_key]({marker_path!r}, 'w').write('bad')\n"
+                "    return 'RIGHT'\n"
+            )
+            with open(policy_path, "w", encoding="utf-8") as f:
+                f.write(source)
+
+            policy = load_policy(policy_path)
+            with self.assertRaises(KeyError):
+                policy.get_action({})
+
+            self.assertFalse(os.path.exists(marker_path))
+
+    def test_loaded_policy_can_use_validated_skills_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = os.path.join(tmp, "candidate.py")
+            source = (
+                "import policies.skills as skills\n\n"
+                "def get_action(state):\n"
+                "    return skills.move_right_and_jump(state, {})\n"
+            )
+            with open(policy_path, "w", encoding="utf-8") as f:
+                f.write(source)
+
+            policy = load_policy(policy_path)
+
+            self.assertEqual(policy.get_action({}), "RIGHT,B")
 
     def test_prepare_candidate_policy_does_not_repair_valid_source(self):
         with tempfile.TemporaryDirectory() as tmp:

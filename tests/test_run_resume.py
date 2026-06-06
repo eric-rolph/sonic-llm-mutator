@@ -6,8 +6,13 @@ from unittest.mock import patch
 import main
 from main import (
     build_stagnation_escape_context,
+    candidate_beats_current_best,
+    candidate_is_promotable,
+    choose_generation_archive_path,
+    derive_resume_state,
     evaluate_working_baseline,
     preserve_frontier_screenshot,
+    render_candidate_video,
     resolve_end_generation,
     seed_population_baseline,
     select_working_frontier_context,
@@ -170,6 +175,103 @@ class RunResumeTests(unittest.TestCase):
             self.assertEqual(main.main(["--generations", "15", "--frames", "2000"]), 0)
 
         run.assert_called_once_with(generations=15, max_frames=2000)
+
+    def test_resume_state_uses_last_generation_and_persisted_stagnation(self):
+        state = derive_resume_state(
+            [
+                {"generation": 7, "fitness": 100.0, "stagnation_counter": 1},
+                {"generation": 8, "fitness": 90.0, "stagnation_counter": 4},
+            ]
+        )
+
+        self.assertEqual(state["all_time_champion_fitness"], 100.0)
+        self.assertEqual(state["start_generation"], 9)
+        self.assertEqual(state["stagnation_counter"], 4)
+
+    def test_resume_state_ignores_malformed_numeric_fields(self):
+        state = derive_resume_state(
+            [{"generation": "bad", "fitness": "bad", "stagnation_counter": "bad"}]
+        )
+
+        self.assertEqual(state["all_time_champion_fitness"], -1.0)
+        self.assertEqual(state["start_generation"], 1)
+        self.assertEqual(state["stagnation_counter"], 0)
+
+    def test_resume_state_ignores_non_finite_numeric_fields(self):
+        state = derive_resume_state(
+            [{"generation": float("inf"), "fitness": float("nan"), "stagnation_counter": 0}]
+        )
+
+        self.assertEqual(state["all_time_champion_fitness"], -1.0)
+        self.assertEqual(state["start_generation"], 1)
+
+    def test_empty_resume_state_uses_initial_defaults(self):
+        self.assertEqual(
+            derive_resume_state([]),
+            {
+                "all_time_champion_fitness": -1.0,
+                "start_generation": 1,
+                "stagnation_counter": 0,
+            },
+        )
+
+    def test_dry_run_candidate_cannot_be_promoted(self):
+        self.assertFalse(candidate_is_promotable(None, object(), {}))
+
+    def test_runtime_broken_candidate_cannot_be_promoted(self):
+        self.assertFalse(
+            candidate_is_promotable(
+                object(),
+                object(),
+                {"runtime_error": "RuntimeError: broken"},
+            )
+        )
+
+    def test_evaluated_runtime_valid_candidate_can_be_promoted(self):
+        self.assertTrue(candidate_is_promotable(object(), object(), {"distance": 10}))
+
+    def test_generation_history_archives_best_candidate_path(self):
+        self.assertEqual(
+            choose_generation_archive_path("policies/candidate_1.py", "policies/working_policy.py"),
+            "policies/candidate_1.py",
+        )
+
+    def test_generation_history_falls_back_to_working_path_without_candidate(self):
+        self.assertEqual(
+            choose_generation_archive_path(None, "policies/working_policy.py"),
+            "policies/working_policy.py",
+        )
+
+    def test_render_candidate_video_waits_for_renderer_and_reports_success(self):
+        completed = main.subprocess.CompletedProcess(args=[], returncode=0)
+        with patch.object(main.os.path, "exists", side_effect=[True, False, True]), patch.object(
+            main.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertTrue(render_candidate_video("candidate.bk2", "latest.mp4"))
+
+        run.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["check"], False)
+
+    def test_render_candidate_video_rejects_failed_render(self):
+        completed = main.subprocess.CompletedProcess(args=[], returncode=3)
+        with patch.object(main.os.path, "exists", side_effect=[True, False]), patch.object(
+            main.subprocess, "run", return_value=completed
+        ):
+            self.assertFalse(render_candidate_video("candidate.bk2", "latest.mp4"))
+
+    def test_render_candidate_video_rejects_timed_out_render(self):
+        with patch.object(main.os.path, "exists", side_effect=[True, False]), patch.object(
+            main.subprocess, "run", side_effect=main.subprocess.TimeoutExpired([], 300)
+        ):
+            self.assertFalse(render_candidate_video("candidate.bk2", "latest.mp4"))
+
+    def test_promotable_candidate_wins_equal_fitness_tie(self):
+        self.assertTrue(candidate_beats_current_best(0.0, True, 0.0, False))
+        self.assertFalse(candidate_beats_current_best(0.0, False, 0.0, True))
+
+    def test_resume_threshold_never_drops_below_historical_champion(self):
+        state = derive_resume_state([{"generation": 8, "fitness": 100.0}])
+        self.assertEqual(max(80.0, state["all_time_champion_fitness"]), 100.0)
 
 
 if __name__ == "__main__":

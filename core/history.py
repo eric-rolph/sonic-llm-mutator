@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import tempfile
 import time
 
 
@@ -13,14 +14,32 @@ class EvolutionHistory:
         self.history = self._load_history()
 
     def _load_history(self):
-        if os.path.exists(self.log_path):
-            with open(self.log_path, 'r') as f:
-                return json.load(f)
-        return []
+        try:
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+            return []
+        if not isinstance(payload, list):
+            return []
+        return [entry for entry in payload if isinstance(entry, dict)]
 
     def _save_history(self):
-        with open(self.log_path, 'w') as f:
-            json.dump(self.history, f, indent=4)
+        directory = os.path.dirname(self.log_path)
+        fd, temp_path = tempfile.mkstemp(
+            dir=directory,
+            prefix=".history-",
+            suffix=".tmp",
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self.history, f, indent=4, allow_nan=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.log_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def log_generation(self, generation, policy_file, fitness, failure_reason, screenshot_path, llm_reasoning, stagnation_counter=0, components=None):
         # Archive the policy file

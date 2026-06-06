@@ -16,6 +16,12 @@ if (Test-Path ".\venv38\Scripts\Activate.ps1") {
 
 # 2. Check if ROM is imported
 $retroPath = python -c "import importlib.util; name = 'stable_retro' if importlib.util.find_spec('stable_retro') else 'retro'; module = __import__(name); print(module.__path__[0])"
+$retroExitCode = $LASTEXITCODE
+if ($retroExitCode -ne 0) {
+    Write-Host "Failed to locate the retro backend." -ForegroundColor Red
+    exit $retroExitCode
+}
+
 $romPath = Join-Path $retroPath "data\stable\SonicTheHedgehog-Genesis\rom.md"
 
 if (-Not (Test-Path $romPath)) {
@@ -34,5 +40,10 @@ if (-Not (Test-Path $romPath)) {
 # 3. Run Pipeline
 Write-Host "Executing Mutator Loop ($Generations generations, $Frames frames/gen)..." -ForegroundColor Cyan
 python -u main.py --generations $Generations --frames $Frames
+$pipelineExitCode = $LASTEXITCODE
+if ($pipelineExitCode -ne 0) {
+    Write-Host "Mutator pipeline failed with exit code $pipelineExitCode." -ForegroundColor Red
+    exit $pipelineExitCode
+}
 
 Write-Host "Pipeline Simulation Complete." -ForegroundColor Green

@@ -1,14 +1,42 @@
+import ast
 import base64
+import importlib
 import json
 import mimetypes
 import os
 import re
+import sys
+import tempfile
 
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from core.policy_validator import validate_skills_source
 from core.trace_context import trace_entry_x
 from llm.prompts import SYSTEM_PROMPT
+
+
+def _top_level_functions(source):
+    return {
+        node.name: ast.dump(node, include_attributes=False)
+        for node in ast.parse(source or "").body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _atomic_write_text(filepath, text):
+    directory = os.path.dirname(filepath) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".skills-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, filepath)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 def extract_json_object(text):
@@ -167,7 +195,7 @@ def get_action(state):
 
     return action
 """
-        with open(filepath, 'w') as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             f.write(seed_code.strip())
 
     def _encode_image(self, image_path):
@@ -196,7 +224,7 @@ def get_action(state):
 
         print(f"Using Cloud API ({self.macro_model}) for Macro-Mutation.")
         try:
-            return self._do_macro_call(prompt, image_path)
+            return self._do_macro_call(prompt, image_path, temperature)
         except Exception as e:
             print(f"Cloud API failed after retries: {e}")
             return self._call_micro_model(prompt, temperature)
@@ -206,7 +234,7 @@ def get_action(state):
         stop=stop_after_attempt(5),
         reraise=True
     )
-    def _do_macro_call(self, prompt, image_path):
+    def _do_macro_call(self, prompt, image_path, temperature):
         response = self.macro_client.chat.completions.create(
             model=self.macro_model,
             messages=[
@@ -224,7 +252,7 @@ def get_action(state):
                     ]
                 }
             ],
-            temperature=0.7,
+            temperature=temperature,
             # Match the micro path: a reasoning vision model (e.g. gemma) spends
             # tokens thinking before it emits code, so a small cap truncates the
             # policy mid-output and the extracted fragment fails to parse.
@@ -343,7 +371,7 @@ Return ONLY a valid JSON object in this exact format:
         skills_path = "policies/skills.py"
         existing_skills = ""
         if os.path.exists(skills_path):
-            with open(skills_path, "r") as f:
+            with open(skills_path, "r", encoding="utf-8") as f:
                 existing_skills = f.read()
 
         prompt = f"""
@@ -370,9 +398,42 @@ Return ONLY valid Python code containing the updated skill library (the existing
                     parts = new_skills_code.split("```")
                     new_skills_code = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
 
-                os.makedirs("policies", exist_ok=True)
-                with open(skills_path, "w") as f:
-                    f.write(new_skills_code)
+                validate_skills_source(new_skills_code)
+                existing_functions = _top_level_functions(existing_skills)
+                new_functions = _top_level_functions(new_skills_code)
+                missing_functions = existing_functions.keys() - new_functions.keys()
+                if missing_functions:
+                    raise ValueError(
+                        "Extracted skills removed existing functions: "
+                        + ", ".join(sorted(missing_functions))
+                    )
+                changed_functions = {
+                    name
+                    for name, definition in existing_functions.items()
+                    if new_functions[name] != definition
+                }
+                if changed_functions:
+                    raise ValueError(
+                        "Extracted skills changed existing functions: "
+                        + ", ".join(sorted(changed_functions))
+                    )
+                _atomic_write_text(skills_path, new_skills_code)
+                importlib.invalidate_caches()
+                loaded_skills = sys.modules.get("policies.skills")
+                try:
+                    if loaded_skills is None:
+                        importlib.import_module("policies.skills")
+                    else:
+                        importlib.reload(loaded_skills)
+                except Exception:
+                    if existing_skills:
+                        _atomic_write_text(skills_path, existing_skills)
+                    elif os.path.exists(skills_path):
+                        os.remove(skills_path)
+                    importlib.invalidate_caches()
+                    if loaded_skills is not None:
+                        importlib.reload(loaded_skills)
+                    raise
                 print("Extracted and saved new skills to policies/skills.py")
             except Exception as e:
                 print(f"Failed to save extracted skills: {e}")
@@ -400,7 +461,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
         skills_path = "policies/skills.py"
         if os.path.exists(skills_path):
             try:
-                with open(skills_path, "r") as f:
+                with open(skills_path, "r", encoding="utf-8") as f:
                     skills_content = f.read().strip()
                     if skills_content and not skills_content.startswith("# This file"):
                         skills_text = "Available Skills (from `policies.skills`):\n```python\n" + skills_content + "\n```\nYou can import these via `import policies.skills as skills` and call them like `skills.my_func(state)`. Use them to construct `get_action(state)`."

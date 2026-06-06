@@ -1,3 +1,7 @@
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,6 +16,67 @@ class RunPipelineTests(unittest.TestCase):
         script = Path("run_pipeline.ps1").read_text(encoding="utf-8")
 
         self.assertIn("[int]$Frames = 12000", script)
+
+    def test_powershell_runner_propagates_main_failure(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not available")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            shutil.copy2("run_pipeline.ps1", root / "run_pipeline.ps1")
+            (root / "venv38" / "Scripts").mkdir(parents=True)
+            (root / "venv38" / "Scripts" / "Activate.ps1").write_text(
+                "", encoding="utf-8"
+            )
+
+            retro_path = root / "retro"
+            rom_path = (
+                retro_path
+                / "data"
+                / "stable"
+                / "SonicTheHedgehog-Genesis"
+                / "rom.md"
+            )
+            rom_path.parent.mkdir(parents=True)
+            rom_path.write_text("test rom marker", encoding="utf-8")
+
+            bin_path = root / "bin"
+            bin_path.mkdir()
+            (bin_path / "python.cmd").write_text(
+                "@echo off\n"
+                'if "%1"=="-c" (\n'
+                f"  echo {retro_path}\n"
+                "  exit /b 0\n"
+                ")\n"
+                "exit /b 23\n",
+                encoding="ascii",
+            )
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_path}{os.pathsep}{env['PATH']}"
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(root / "run_pipeline.ps1"),
+                    "-Generations",
+                    "1",
+                    "-Frames",
+                    "1",
+                ],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(23, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("Pipeline Simulation Complete.", result.stdout)
 
 
 if __name__ == "__main__":

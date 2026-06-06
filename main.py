@@ -3,20 +3,21 @@ import ast
 import concurrent.futures
 import glob
 import hashlib
-import importlib.util
-import json
+import math
 import os
 import random
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.abspath("."))
 
 from core.actions import action_string_to_array
 from core.evaluator import calculate_fitness
 from core.history import EvolutionHistory
+from core.policy_loader import load_policy
 from core.policy_runner import PolicyRunner, PolicyTimeout
 from core.policy_validator import validate_policy_source
 from core.population import PopulationArchive
@@ -40,14 +41,20 @@ LEVEL_SETTLE_FRAMES = 150
 STUCK_FRAME_LIMIT = 500
 
 
-def load_policy(filepath):
-    """Loads a python script dynamically."""
-    with open(filepath, "r", encoding="utf-8") as f:
-        validate_policy_source(f.read())
-    spec = importlib.util.spec_from_file_location("current_policy", filepath)
-    policy_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(policy_module)
-    return policy_module
+def atomic_write_text(filepath, text):
+    """Write UTF-8 text without exposing a truncated destination on failure."""
+    directory = os.path.dirname(filepath) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".policy-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, filepath)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbose=True, action_repeat=1):
@@ -188,8 +195,7 @@ def record_candidate_evaluation(
 
 def prepare_candidate_policy(candidate_path, code, reasoning, mutator, archive):
     """Load a candidate, making at most one local repair after validation failure."""
-    with open(candidate_path, "w", encoding="utf-8") as f:
-        f.write(code)
+    atomic_write_text(candidate_path, code)
 
     try:
         policy = load_policy(candidate_path)
@@ -224,8 +230,7 @@ def prepare_candidate_policy(candidate_path, code, reasoning, mutator, archive):
     repaired_code = str(repaired_code or "")
     repair_reasoning = str(repair_reasoning or "")
     combined_reasoning = f"{reasoning}\nValidator repair: {repair_reasoning}".strip()
-    with open(candidate_path, "w", encoding="utf-8") as f:
-        f.write(repaired_code)
+    atomic_write_text(candidate_path, repaired_code)
     try:
         repaired_policy = load_policy(candidate_path)
         repaired_error = None
@@ -259,6 +264,8 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
     cumulative_distance = 0
     prev_zone_act = None
     settle_frames_left = 0
+    settle_origin_x = 0
+    runtime_error = None
 
     current_vision_context = "UNKNOWN"
 
@@ -279,36 +286,95 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
     # analysis on a fatal failure is unaffected either way.
     proactive_vision = os.environ.get("SONIC_PROACTIVE_VISION", "1") != "0"
 
-    runner = PolicyRunner(policy)
+    try:
+        runner = PolicyRunner(policy)
+    except Exception as e:
+        reason = f"Policy runner failed to start: {type(e).__name__}: {e}"
+        return (
+            0.0,
+            0,
+            0,
+            reason,
+            capture_screenshot(env),
+            [],
+            {"runtime_error": reason},
+        )
     vision_executor = (
         concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision")
         if proactive_vision else None
     )
     vision_future = None
 
-    try:
-        while not done and frames_alive < max_frames:
-            state = env.get_state()
-            state_completion_x = state.get("screen_x_end") or state.get("completion_x")
-            if state_completion_x:
-                completion_x = state_completion_x
+    def valid_zone_act(zone_act):
+        return zone_act[0] is not None and zone_act[1] is not None
 
-            # Detect a level transition: when (zone, act) changes the game has
-            # advanced to the next act, so bank the cleared level's distance and
-            # reset per-level progress (otherwise the x-reset to ~0 would look
-            # like Sonic getting stuck).
-            zone_act = (state.get("zone"), state.get("act"))
-            if prev_zone_act is not None and zone_act != prev_zone_act:
-                # max_x here is the cleared act's true furthest point; bank it.
-                cumulative_distance += max_x
-                levels_cleared += 1
-                stuck_counter = 0
-                # Re-baseline over the next few frames (x is still mid-reset).
-                settle_frames_left = LEVEL_SETTLE_FRAMES
-                if verbose:
-                    print(f"Level cleared! Entering zone {zone_act[0]} act {zone_act[1]} (total cleared: {levels_cleared})")
+    def is_forward_transition(previous, current):
+        if not valid_zone_act(previous) or not valid_zone_act(current):
+            return False
+        try:
+            previous_zone, previous_act = map(int, previous)
+            current_zone, current_act = map(int, current)
+        except (TypeError, ValueError):
+            return False
+        return current_zone > previous_zone or (
+            current_zone == previous_zone and current_act > previous_act
+        )
+
+    def update_authoritative_progress(authoritative_state, frames_advanced):
+        nonlocal completion_x, cumulative_distance, levels_cleared
+        nonlocal max_x, prev_zone_act, settle_frames_left, settle_origin_x
+        nonlocal stuck_counter
+
+        zone_act = (authoritative_state.get("zone"), authoritative_state.get("act"))
+        transitioned = False
+        if prev_zone_act is None or (not valid_zone_act(prev_zone_act) and valid_zone_act(zone_act)):
             prev_zone_act = zone_act
+        elif is_forward_transition(prev_zone_act, zone_act):
+            settle_origin_x = max_x
+            cumulative_distance += max_x
+            levels_cleared += 1
+            max_x = 0
+            stuck_counter = 0
+            settle_frames_left = LEVEL_SETTLE_FRAMES
+            prev_zone_act = zone_act
+            completion_x = None
+            transitioned = True
+            if verbose:
+                print(
+                    f"Level cleared! Entering zone {zone_act[0]} act {zone_act[1]} "
+                    f"(total cleared: {levels_cleared})"
+                )
 
+        state_completion_x = authoritative_state.get("screen_x_end") or authoritative_state.get("completion_x")
+        if state_completion_x:
+            completion_x = state_completion_x
+
+        current_x = authoritative_state.get("x_pos", 0)
+        if transitioned:
+            # The act flag can change before x resets. Do not count that stale
+            # high x in both the cleared act and the new act.
+            if current_x < settle_origin_x:
+                max_x = current_x
+            return zone_act
+
+        if settle_frames_left > 0:
+            settle_frames_left = max(0, settle_frames_left - frames_advanced)
+            if current_x < settle_origin_x and current_x > max_x:
+                max_x = current_x
+            stuck_counter = 0
+        elif current_x > max_x:
+            max_x = current_x
+            stuck_counter = 0
+        elif authoritative_state.get("level_end_bonus"):
+            stuck_counter = 0
+        else:
+            stuck_counter += frames_advanced
+        return zone_act
+
+    try:
+        state = env.get_state()
+        zone_act = update_authoritative_progress(state, 0)
+        while not done and frames_alive < max_frames:
             if proactive_vision:
                 # Pick up the most recent finished vision result without blocking.
                 if vision_future is not None and vision_future.done():
@@ -330,15 +396,16 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
                         context_screenshots = context_screenshots[-CONTEXT_SCREENSHOT_SLOTS:]
                         vision_future = vision_executor.submit(mutator.analyze_environment, shot)
 
-            state['vision_context'] = current_vision_context
+            policy_state = dict(state)
+            policy_state["vision_context"] = current_vision_context
 
             try:
-                action_string = runner.get_action(state, timeout=0.5)
+                action_string = runner.get_action(policy_state, timeout=0.5)
             except PolicyTimeout:
                 if verbose:
                     print("Policy timed out (infinite loop?)")
-                action_string = ""
                 done = True
+                runtime_error = "PolicyTimeout: get_action exceeded 0.5 seconds"
                 # "timeout" keyword routes this to the local code model (it is a
                 # code bug, not a visual hazard) and triggers lesson extraction.
                 failure_reason = "Policy code timeout (likely an infinite loop in get_action)."
@@ -346,40 +413,38 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
             except Exception as e:
                 if verbose:
                     print(f"Policy threw exception: {e}")
-                action_string = "RIGHT"
+                done = True
+                runtime_error = f"{type(e).__name__}: {e}"
+                failure_reason = f"Policy code exception: {runtime_error}"
+                break
 
-            if not isinstance(action_string, str):
-                action_string = "RIGHT"
+            if type(action_string) is not str:
+                done = True
+                runtime_error = f"get_action returned non-string {type(action_string).__name__}"
+                failure_reason = f"Policy code returned a non-string action: {type(action_string).__name__}"
+                break
+            if len(action_string) > 128:
+                done = True
+                runtime_error = f"get_action returned an oversized action string ({len(action_string)} characters)"
+                failure_reason = "Policy code returned an oversized action string."
+                break
 
             # Record a rich trace entry at a fixed frame cadence.
             if frames_alive - last_trace_frame >= TRACE_INTERVAL:
                 last_trace_frame = frames_alive
-                trace.append(build_trace_entry(frames_alive, state, action_string))
+                trace.append(build_trace_entry(frames_alive, policy_state, action_string))
 
             action = action_string_to_array(action_string)
 
+            frames_before_action = frames_alive
             for _ in range(action_repeat):
                 if done or frames_alive >= max_frames:
                     break
                 obs, reward, done, info = env.step(action)
                 frames_alive += 1
 
-            current_x = state.get('x_pos', 0)
-            if settle_frames_left > 0:
-                # Just transitioned to a new act; follow the live x down to its
-                # reset value and don't count stuck while it settles.
-                settle_frames_left -= 1
-                max_x = current_x
-                stuck_counter = 0
-            elif current_x > max_x:
-                max_x = current_x
-                stuck_counter = 0
-            elif state.get('level_end_bonus'):
-                # End-of-level tally is playing (Sonic ran off-screen); the x
-                # plateau here is success, not being stuck.
-                stuck_counter = 0
-            else:
-                stuck_counter += action_repeat
+            state = env.get_state()
+            zone_act = update_authoritative_progress(state, frames_alive - frames_before_action)
 
             if stuck_counter > STUCK_FRAME_LIMIT:
                 if verbose:
@@ -406,7 +471,11 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
     else:
         failure_reason = "Sonic lost a life or hit a fatal obstacle."
 
-    if completion_x:
+    if runtime_error is not None:
+        fitness = 0.0
+        max_x = 0
+        components = {"runtime_error": runtime_error}
+    elif completion_x:
         fitness, components = calculate_fitness(
             max_x,
             frames_alive,
@@ -459,13 +528,12 @@ def update_pool(code, fitness, pool_dir="policies/pool", max_size=6):
     os.makedirs(pool_dir, exist_ok=True)
     code_hash = hashlib.sha1(code.encode("utf-8")).hexdigest()[:8]
     new_path = os.path.join(pool_dir, f"pool_{fitness:.2f}_{code_hash}.py")
-    with open(new_path, "w") as f:
-        f.write(code)
+    atomic_write_text(new_path, code)
 
     pool = []
     for path in glob.glob(os.path.join(pool_dir, "pool_*.py")):
         try:
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 pool_code = f.read()
             pool.append(
                 {
@@ -474,7 +542,7 @@ def update_pool(code, fitness, pool_dir="policies/pool", max_size=6):
                     "signature": policy_action_signature(pool_code),
                 }
             )
-        except (OSError, ValueError):
+        except (OSError, UnicodeError, ValueError):
             pass
 
     species_leaders = {}
@@ -505,9 +573,9 @@ def load_pool_codes(pool_dir="policies/pool"):
     codes = []
     for pf in glob.glob(os.path.join(pool_dir, "pool_*.py")):
         try:
-            with open(pf, "r") as f:
+            with open(pf, "r", encoding="utf-8") as f:
                 codes.append(f.read())
-        except OSError:
+        except (OSError, UnicodeError):
             pass
     return codes
 
@@ -529,8 +597,16 @@ def build_frontier_guard_candidate(working_code, trace, sample_count=3, x_radius
 
     frontier_x = round(sum(xs) / len(xs))
     marker = f"# FRONTIER_GUARD zone={zone} act={act} x={frontier_x}"
-    if marker in working_code:
-        return None
+    for existing_zone, existing_act, existing_x in re.findall(
+        r"# FRONTIER_GUARD zone=(\S+) act=(\S+) x=(-?\d+)",
+        working_code,
+    ):
+        if (
+            existing_zone == str(zone)
+            and existing_act == str(act)
+            and abs(int(existing_x) - frontier_x) <= x_radius * 2
+        ):
+            return None
 
     last_action = str(samples[-1].get("action", ""))
     recovery_action = "RIGHT,B" if "DOWN" in last_action or "B" not in last_action else "RIGHT"
@@ -568,6 +644,24 @@ def build_frontier_guard_candidate(working_code, trace, sample_count=3, x_radius
     return candidate
 
 
+def frontier_guard_marker(code):
+    match = re.search(r"# FRONTIER_GUARD zone=\S+ act=\S+ x=-?\d+", code or "")
+    return match.group(0) if match else None
+
+
+def recently_attempted_frontier_guard(marker, recent_history):
+    for entry in recent_history or []:
+        recorded_marker = entry.get("frontier_guard_marker")
+        if recorded_marker is None:
+            recorded_marker = entry.get("components", {}).get("frontier_guard_marker")
+        recorded_markers = entry.get("components", {}).get("frontier_guard_markers", [])
+        if marker in recorded_markers:
+            return True
+        if recorded_marker == marker:
+            return True
+    return False
+
+
 def generate_candidates(
     mutator,
     working_code,
@@ -590,6 +684,11 @@ def generate_candidates(
     candidates_code = [None] * n_candidates
     first_llm_slot = 0
     frontier_guard = build_frontier_guard_candidate(working_code, last_trace)
+    if frontier_guard is not None and recently_attempted_frontier_guard(
+        frontier_guard_marker(frontier_guard),
+        recent_history,
+    ):
+        frontier_guard = None
     if n_candidates > 0 and frontier_guard is not None:
         print("Adding deterministic frontier-guard candidate.")
         candidates_code[0] = (frontier_guard, "Deterministic frontier guard")
@@ -652,6 +751,65 @@ def resolve_end_generation(start_gen, max_generations, generations=None):
     return start_gen + generations - 1
 
 
+def derive_resume_state(history_entries):
+    if not history_entries:
+        return {
+            "all_time_champion_fitness": -1.0,
+            "start_generation": 1,
+            "stagnation_counter": 0,
+        }
+    def number(entry, key, default, converter):
+        try:
+            value = converter(entry.get(key, default))
+            if isinstance(value, float) and not math.isfinite(value):
+                return default
+            return value
+        except (OverflowError, TypeError, ValueError):
+            return default
+
+    return {
+        "all_time_champion_fitness": max(
+            number(entry, "fitness", -1.0, float) for entry in history_entries
+        ),
+        "start_generation": number(history_entries[-1], "generation", 0, int) + 1,
+        "stagnation_counter": number(
+            history_entries[-1], "stagnation_counter", 0, int
+        ),
+    }
+
+
+def candidate_is_promotable(env, policy, components):
+    return env is not None and policy is not None and not components.get("runtime_error")
+
+
+def candidate_beats_current_best(fitness, promotable, best_fitness, best_promotable):
+    return fitness > best_fitness or (
+        fitness == best_fitness and promotable and not best_promotable
+    )
+
+
+def choose_generation_archive_path(best_candidate_path, working_path):
+    return best_candidate_path or working_path
+
+
+def render_candidate_video(bk2_path, mp4_path):
+    if not os.path.exists(bk2_path):
+        return False
+    if os.path.exists(mp4_path):
+        os.remove(mp4_path)
+    try:
+        result = subprocess.run(
+            [sys.executable, "render_video.py", bk2_path, mp4_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0 and os.path.exists(mp4_path)
+
+
 def run_evaluation_loop(
     max_generations=500,
     max_frames=12000,
@@ -685,22 +843,13 @@ def run_evaluation_loop(
     if not os.path.exists(working_path):
         shutil.copy(champion_path, working_path)
 
-    all_time_champion_fitness = -1.0
-    start_gen = 1
-    history_file = "artifacts/history.json"
-    if os.path.exists(history_file):
-        try:
-            with open(history_file, "r") as f:
-                hist_data = json.load(f)
-                if hist_data:
-                    all_time_champion_fitness = max([entry.get('fitness', -1.0) for entry in hist_data])
-                    start_gen = hist_data[-1].get('generation', 0) + 1
-        except Exception as e:
-            print(f"Failed to load history for fitness: {e}")
-
-    stagnation_counter = 0
+    resume_state = derive_resume_state(history.history)
+    all_time_champion_fitness = resume_state["all_time_champion_fitness"]
+    start_gen = resume_state["start_generation"]
+    stagnation_counter = resume_state["stagnation_counter"]
     baseline_context = evaluate_working_baseline(env, working_path, mutator, max_frames, action_repeat=action_repeat)
     working_fitness = baseline_context["working_fitness"]
+    working_fitness = max(working_fitness, all_time_champion_fitness)
     working_frontier = {
         "failure_reason": baseline_context["last_failure_reason"],
         "trace": baseline_context["last_trace"],
@@ -731,7 +880,7 @@ def run_evaluation_loop(
             }
             stagnation_counter = 0
 
-        with open(working_path, 'r') as f:
+        with open(working_path, "r", encoding="utf-8") as f:
             working_code = f.read()
 
         best_candidate_code = None
@@ -742,6 +891,9 @@ def run_evaluation_loop(
         best_candidate_trace = []
         best_candidate_components = {}
         best_candidate_idx = -1
+        best_candidate_path = None
+        best_candidate_promotable = False
+        attempted_frontier_markers = set()
 
         # Generate candidates
         recent_history = history.get_recent_history(3)
@@ -810,6 +962,12 @@ def run_evaluation_loop(
                     if candidate_bk2_path != latest_bk2:
                         os.rename(latest_bk2, candidate_bk2_path)
 
+            marker = frontier_guard_marker(new_code)
+            if reasoning == "Deterministic frontier guard" and marker is not None:
+                components = dict(components)
+                components["frontier_guard_marker"] = marker
+                attempted_frontier_markers.add(marker)
+
             record_candidate_evaluation(
                 population,
                 new_code,
@@ -820,7 +978,13 @@ def run_evaluation_loop(
                 reasoning,
             )
 
-            if fitness > best_candidate_fitness:
+            promotable = candidate_is_promotable(env, policy, components)
+            if candidate_beats_current_best(
+                fitness,
+                promotable,
+                best_candidate_fitness,
+                best_candidate_promotable,
+            ):
                 best_candidate_fitness = fitness
                 best_candidate_code = new_code
                 best_candidate_reason = failure_reason
@@ -832,19 +996,30 @@ def run_evaluation_loop(
                 best_candidate_trace = trace
                 best_candidate_components = components
                 best_candidate_idx = c
+                best_candidate_path = candidate_path
+                best_candidate_promotable = promotable
+
+        if attempted_frontier_markers:
+            best_candidate_components = dict(best_candidate_components)
+            best_candidate_components["frontier_guard_markers"] = sorted(
+                attempted_frontier_markers
+            )
 
         # Promote or Stagnate
         best_bk2 = f"artifacts/videos/tmp/candidate_{best_candidate_idx}.bk2"
         latest_mp4 = "artifacts/videos/latest.mp4"
 
+        latest_video_rendered = False
         if os.path.exists(best_bk2):
             print("Rendering video for generation's best candidate...")
             try:
-                subprocess.Popen([sys.executable, "render_video.py", best_bk2, latest_mp4], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                latest_video_rendered = render_candidate_video(best_bk2, latest_mp4)
+                if not latest_video_rendered:
+                    print("Failed to render video: renderer exited without a video.")
             except Exception as e:
                 print(f"Failed to render video: {e}")
 
-        if best_candidate_fitness > working_fitness:
+        if best_candidate_promotable and best_candidate_fitness > working_fitness:
             print(f"Working policy improved from {working_fitness:.2f} -> {best_candidate_fitness:.2f}")
             working_fitness = best_candidate_fitness
             stagnation_counter = 0
@@ -859,8 +1034,7 @@ def run_evaluation_loop(
             )
 
             # Update working file
-            with open(working_path, 'w') as f:
-                f.write(best_candidate_code)
+            atomic_write_text(working_path, best_candidate_code)
 
             # Update the FunSearch genetic population pool
             update_pool(best_candidate_code, best_candidate_fitness)
@@ -878,7 +1052,7 @@ def run_evaluation_loop(
 
                 # Convert video for new champion
                 champion_mp4 = "artifacts/videos/champion.mp4"
-                if os.path.exists(latest_mp4):
+                if latest_video_rendered:
                     try:
                         if os.path.exists(champion_mp4):
                             os.remove(champion_mp4)
@@ -887,11 +1061,10 @@ def run_evaluation_loop(
                         print(f"Failed to copy champion video: {e}")
 
                 # Update all-time champion file
-                with open(champion_path, 'w') as f:
-                    f.write(best_candidate_code)
+                atomic_write_text(champion_path, best_candidate_code)
 
             # Archive the winning candidate
-            history.log_generation(gen, working_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
+            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
         else:
             print(f"No candidate beat the working policy ({working_fitness:.2f}). Stagnation counter: {stagnation_counter + 1}")
             stagnation_counter += 1
@@ -904,7 +1077,7 @@ def run_evaluation_loop(
                     print(f"Failed to extract lesson: {e}")
 
             # We log the generation even if it failed so the dashboard updates
-            history.log_generation(gen, working_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
+            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
 
 
 def main(argv=None):

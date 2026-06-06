@@ -53,5 +53,200 @@
         "x": 9767,
         "hazard": "Pitfall",
         "lesson": "When at X=9767, jump or maintain forward momentum to avoid falling into the pit."
+    },
+    {
+        "x": 9767,
+        "hazard": "Wall/End-of-act obstacle",
+        "lesson": "If x_velocity remains 0 while attempting 'RIGHT,B' at X=9767, vary the input to avoid getting stuck against level geometry."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When x_velocity is 0 and stuck at X=3061, avoid spamming 'RIGHT,B' and instead try a pure jump or changing movement to break the deadlock."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If forward progress stops (x_velocity is 0) while pressing RIGHT at X=3061, use 'RIGHT,B' to jump over the obstacle."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Ledge",
+        "lesson": "If x_velocity remains 0 while attempting to move RIGHT at X=3061, stop spamming RIGHT,B and try a pure jump 'B' or just 'RIGHT' to overcome the obstacle."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Ledge",
+        "lesson": "When x_velocity drops to 0 while attempting to move right, avoid spamming jumps in place; instead, ensure the RIGHT button is held consistently during and after the jump to maintain forward momentum."
+    },
+    {
+        "x": 1077,
+        "hazard": "stuck in dip/geometry",
+        "lesson": "If x_velocity remains 0 while attempting to move right, stop using RIGHT,DOWN and instead use B (jump) or RIGHT to break the stall."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When forward progress stops (x_velocity == 0) while attempting to move right, vary the input sequence or increase jump height to overcome the obstacle at X=3061."
+    },
+    {
+        "x": 1077,
+        "hazard": "Wall or Ledge",
+        "lesson": "If x_velocity is 0 while attempting to move RIGHT, switch from 'RIGHT,DOWN' to 'RIGHT,B' to jump over the obstacle."
+    },
+    {
+        "x": 1077,
+        "hazard": "Wall/Obstacle",
+        "lesson": "Avoid using 'RIGHT,DOWN' when x_velocity is 0; use 'RIGHT' or jump ('RIGHT,B') to overcome obstacles and regain momentum."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When x_velocity is 0 while attempting to move RIGHT at X=3061, vary the action sequence (e.g., try 'B' or 'RIGHT') to break out of the stall and clear the obstacle."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When forward progress stalls (x_velocity approx 0) while moving RIGHT at X=3061, increase jump frequency or attempt to build momentum to clear the obstacle."
+    },
+    {
+        "x": 1077,
+        "hazard": "Terrain Obstacle",
+        "lesson": "Avoid repeating 'RIGHT,DOWN' when x_velocity is 0; switch to 'RIGHT' or 'B' to overcome obstacles and regain momentum."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If forward progress stops (x_velocity == 0) while attempting to move right, try jumping without the RIGHT modifier or vary the action sequence to break out of the stuck state."
+    },
+    {
+        "x": 3060,
+        "hazard": "Wall/Ledge",
+        "lesson": "When stuck at X=3060 in Zone 0 Act 0, increase jump frequency and maintain RIGHT input to overcome the vertical obstacle."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When forward progress stops at X=3061 in Zone 0 Act 0, stop spamming 'RIGHT,B' and attempt a pure jump 'B' or check for vertical obstacles to regain momentum."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Ledge",
+        "lesson": "When forward progress stops at X=3061, increase jump frequency and ensure RIGHT is held to overcome the vertical obstacle."
+    },
+    {
+        "x": 203,
+        "hazard": "Wall/Slope Collision",
+        "lesson": "Avoid using 'RIGHT,DOWN' when x_velocity is 0; if stuck, prioritize 'RIGHT' or 'RIGHT,B' to regain momentum."
+    },
+    {
+        "x": 203,
+        "hazard": "Wall/Obstacle",
+        "lesson": "Avoid using RIGHT,DOWN as a default movement action when x_velocity is zero, as it can cause Sonic to get stuck against walls; prioritize RIGHT and B (jump) to regain momentum."
+    },
+    {
+        "x": 1077,
+        "hazard": "Obstacle/Wall",
+        "lesson": "When forward progress stops (x_velocity == 0) while attempting to move RIGHT in Zone 0 Act 1, use B to jump over the obstacle instead of using DOWN."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If forward progress stops (x_velocity == 0) while pressing RIGHT, stop spamming RIGHT,B and try a pure jump or check for vertical obstacles."
+    },
+    {
+        "x": 1077,
+        "hazard": "Stuck in geometry",
+        "lesson": "Avoid repeating 'RIGHT,DOWN' when x_velocity is 0; use 'RIGHT' or jump with 'B' to regain momentum."
+    },
+    {
+        "x": 1077,
+        "hazard": "Wall/Obstacle",
+        "lesson": "Avoid using 'RIGHT,DOWN' repeatedly when x_velocity is 0; switch to 'RIGHT' or 'B' (jump) to overcome obstacles."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If x_velocity remains near 0 while pressing RIGHT and jumping, Sonic is likely stuck against a wall; increase jump frequency or check for higher platforms to regain forward momentum."
+    },
+    {
+        "x": 1077,
+        "hazard": "Wall/Geometry blockage",
+        "lesson": "Avoid using RIGHT,DOWN when forward progress stops; instead, use B to jump over potential obstacles."
+    },
+    {
+        "x": 1077,
+        "hazard": "Wall/Obstacle",
+        "lesson": "Avoid using 'RIGHT,DOWN' when velocity is zero as it prevents jumping and forward progress; prioritize 'RIGHT' or 'RIGHT,B' to overcome obstacles."
+    },
+    {
+        "x": 80,
+        "hazard": "Initial terrain stagnation",
+        "lesson": "When x_velocity is near 0 while moving RIGHT, incorporate jumps (B) to overcome small terrain irregularities and maintain forward momentum."
+    },
+    {
+        "x": 287,
+        "hazard": "Initial terrain/wall",
+        "lesson": "If forward progress stalls at the start of the level, use 'RIGHT,B' or 'B' to jump over small obstacles and maintain momentum."
+    },
+    {
+        "x": 1077,
+        "hazard": "Stuck in place",
+        "lesson": "Avoid combining RIGHT and DOWN when x_velocity is 0; use RIGHT or jump (B) to break out of a standstill."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Geometry",
+        "lesson": "If x_velocity is 0 while pressing RIGHT,B at X=3061, stop spamming jump and attempt a different movement pattern to overcome the obstacle."
+    },
+    {
+        "x": 1077,
+        "hazard": "Wall/Obstacle",
+        "lesson": "Avoid using 'RIGHT,DOWN' when forward progress stops; switch to 'RIGHT' or 'B' to overcome obstacles."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When x_velocity is 0 while pressing RIGHT at X=3061, try a pure jump (B) or alternating movements to overcome the obstacle."
+    },
+    {
+        "x": 203,
+        "hazard": "Wall/Slope Obstacle",
+        "lesson": "If x_velocity is 0 while attempting to move forward, stop using the DOWN modifier and try jumping with B or pressing RIGHT alone to break out of the stuck state."
+    },
+    {
+        "x": 1077,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If forward progress stops while attempting 'RIGHT,DOWN', stop pressing DOWN and try jumping with 'B' or using only 'RIGHT' to overcome the obstacle."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If x_velocity remains 0 while attempting to move right at X=3061, stop spamming RIGHT,B and attempt a different movement pattern to break the stall."
+    },
+    {
+        "x": 203,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If x_velocity is 0 while attempting forward progress, stop using 'RIGHT,DOWN' and attempt a jump ('RIGHT,B') or simple 'RIGHT' to clear the obstacle."
+    },
+    {
+        "x": 203,
+        "hazard": "Wall/Obstacle",
+        "lesson": "Avoid using RIGHT,DOWN when x_velocity is 0; prioritize RIGHT or B (jump) to break out of stationary states."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If x_velocity is 0 while attempting to move right, stop spamming 'RIGHT,B' and try a different action sequence to avoid getting stuck against geometry."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If x_velocity remains 0 while attempting 'RIGHT,B', the agent is stuck against a wall; try varying the input to just 'B' or 'RIGHT' to break the loop."
+    },
+    {
+        "x": 1077,
+        "hazard": "Wall/Slope Collision",
+        "lesson": "Avoid using 'RIGHT,DOWN' when x_velocity is 0, as it can cause Sonic to get stuck against walls; use 'RIGHT' or jump ('RIGHT,B') to regain momentum."
     }
 ]

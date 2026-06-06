@@ -6,6 +6,7 @@ import re
 import time
 from pathlib import Path
 
+from core.policy_validator import validate_policy_source
 from core.trace_context import trace_entry_x
 
 
@@ -180,20 +181,31 @@ class PopulationArchive:
     def select_parent_codes(self, rng=None, elite_limit=64, exploration_constant=0.2):
         rng = rng or __import__("random")
         records = self.load_records()
-        elites = self.elite_candidates(limit=elite_limit)
+        elites = []
+        for record in self.elite_candidates(limit=len(records)):
+            try:
+                code = self._read_code(record)
+                validate_policy_source(code)
+            except (OSError, UnicodeError, ValueError):
+                continue
+            elites.append((record, code))
+            if len(elites) >= elite_limit:
+                break
         if len(elites) < 2:
             return None
 
-        fitnesses = [float(record.get("fitness", 0.0)) for record in elites]
+        fitnesses = [float(record.get("fitness", 0.0)) for record, _code in elites]
         low = min(fitnesses)
         spread = max(fitnesses) - low
-        total_visits = sum(int(record.get("selection_visits", 0)) for record in elites)
+        total_visits = sum(
+            int(record.get("selection_visits", 0)) for record, _code in elites
+        )
 
         available = list(elites)
         chosen = []
         while available and len(chosen) < 2:
             weights = []
-            for record in available:
+            for record, _code in available:
                 fitness = float(record.get("fitness", 0.0))
                 normalized = (fitness - low) / spread if spread else 1.0
                 weights.append(
@@ -207,10 +219,10 @@ class PopulationArchive:
             threshold = rng.random() * sum(weights)
             cumulative = 0.0
             selected = available[-1]
-            for record, weight in zip(available, weights):
+            for candidate, weight in zip(available, weights):
                 cumulative += weight
                 if threshold <= cumulative:
-                    selected = record
+                    selected = candidate
                     break
             chosen.append(selected)
             available.remove(selected)
@@ -218,9 +230,9 @@ class PopulationArchive:
         if len(chosen) < 2:
             return None
 
-        chosen_ids = {record.get("policy_id") for record in chosen}
+        chosen_ids = {record.get("policy_id") for record, _code in chosen}
         for record in records:
             if record.get("policy_id") in chosen_ids:
                 record["selection_visits"] = int(record.get("selection_visits", 0)) + 1
         self._save_records(records)
-        return self._read_code(chosen[0]), self._read_code(chosen[1])
+        return chosen[0][1], chosen[1][1]

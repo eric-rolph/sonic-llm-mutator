@@ -1,7 +1,10 @@
+import os
+import tempfile
 import time
 import unittest
 
 from core.policy_runner import PolicyRunner, PolicyTimeout
+from main import load_policy
 
 
 class FastPolicy:
@@ -58,13 +61,42 @@ class PolicyRunnerTests(unittest.TestCase):
             runner.get_action({}, timeout=0.1)
         elapsed = time.monotonic() - start
 
-        # Should give up promptly, not wait for the 5s sleep.
         self.assertLess(elapsed, 2.0)
         self.assertTrue(runner.broken)
-
-        # A broken runner refuses further work instead of hanging again.
         with self.assertRaises(PolicyTimeout):
             runner.get_action({}, timeout=0.1)
+
+    def test_loaded_generated_policy_runs_in_killable_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "policy.py")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("def get_action(state):\n    return 'RIGHT'\n")
+            runner = PolicyRunner(load_policy(path))
+            try:
+                self.assertEqual(runner.get_action({}, timeout=3.0), "RIGHT")
+                self.assertTrue(runner.process_isolation)
+                self.assertTrue(runner.memory_limited)
+            finally:
+                runner.close()
+
+        self.assertFalse(runner.worker_alive)
+
+    def test_timed_out_generated_policy_process_is_terminated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "policy.py")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(
+                    "def get_action(state):\n"
+                    "    for _ in range(1000000000):\n"
+                    "        pass\n"
+                    "    return 'RIGHT'\n"
+                )
+            runner = PolicyRunner(load_policy(path))
+            with self.assertRaises(PolicyTimeout):
+                runner.get_action({}, timeout=0.2)
+
+            self.assertTrue(runner.process_isolation)
+            self.assertFalse(runner.worker_alive)
 
 
 if __name__ == "__main__":

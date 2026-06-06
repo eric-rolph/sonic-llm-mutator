@@ -50,6 +50,23 @@ class FakeEnv:
         return "fake_screenshot.png"
 
 
+class MutatingPolicy:
+    def get_action(self, state):
+        state["x_pos"] = 1_000_000_000
+        state["score"] = 1_000_000_000
+        return "RIGHT"
+
+
+class RaisingPolicy:
+    def get_action(self, state):
+        raise RuntimeError("broken candidate")
+
+
+class NonStringPolicy:
+    def get_action(self, state):
+        return ["RIGHT"]
+
+
 class EvaluatePolicyTests(unittest.TestCase):
     def evaluate_silently(self, env, max_frames, policy=None, **kwargs):
         return evaluate_policy(
@@ -230,6 +247,86 @@ class EvaluatePolicyTests(unittest.TestCase):
         self.assertEqual(components["levels_cleared"], 1)
         self.assertEqual(components["levels"], LEVEL_CLEARED_BONUS)
         self.assertEqual(max_x, 500)  # furthest in the *current* act, not the 1000 from act 0
+
+    def test_policy_cannot_mutate_authoritative_state_used_for_fitness(self):
+        states = [{"x_pos": 10, "y_pos": 100, "rings": 0, "score": 0}] * 3
+        env = FakeEnv(states)
+
+        fitness, _, max_x, _, _, _, components = self.evaluate_silently(
+            env,
+            max_frames=1,
+            policy=MutatingPolicy(),
+        )
+
+        self.assertEqual(max_x, 10)
+        self.assertEqual(components["score"], 0)
+        self.assertLess(fitness, 1_000_000)
+
+    def test_scores_authoritative_post_step_state(self):
+        class PostStepStateEnv(FakeEnv):
+            def step(self, action):
+                self.step_count += 1
+                self.index = 1
+                return None, 0, True, {}
+
+        env = PostStepStateEnv(
+            [
+                {"x_pos": 0, "y_pos": 100, "rings": 0, "score": 0},
+                {"x_pos": 100, "y_pos": 100, "rings": 2, "score": 50},
+            ],
+            done_after=1,
+        )
+
+        _, _, max_x, _, _, _, components = self.evaluate_silently(env, max_frames=10)
+
+        self.assertEqual(max_x, 100)
+        self.assertEqual(components["rings"], 2)
+        self.assertGreater(components["score"], 0)
+
+    def test_policy_exception_invalidates_candidate_without_stepping(self):
+        env = FakeEnv([{"x_pos": 10, "y_pos": 100, "rings": 0, "score": 0}] * 3)
+
+        fitness, frames, max_x, reason, _, _, components = self.evaluate_silently(
+            env,
+            max_frames=3,
+            policy=RaisingPolicy(),
+        )
+
+        self.assertEqual(fitness, 0.0)
+        self.assertEqual(frames, 0)
+        self.assertEqual(max_x, 0)
+        self.assertEqual(env.step_count, 0)
+        self.assertIn("exception", reason.lower())
+        self.assertIn("runtime_error", components)
+
+    def test_non_string_action_invalidates_candidate_without_stepping(self):
+        env = FakeEnv([{"x_pos": 10, "y_pos": 100, "rings": 0, "score": 0}] * 3)
+
+        fitness, frames, max_x, reason, _, _, components = self.evaluate_silently(
+            env,
+            max_frames=3,
+            policy=NonStringPolicy(),
+        )
+
+        self.assertEqual(fitness, 0.0)
+        self.assertEqual(frames, 0)
+        self.assertEqual(max_x, 0)
+        self.assertEqual(env.step_count, 0)
+        self.assertIn("non-string", reason.lower())
+        self.assertIn("runtime_error", components)
+
+    def test_policy_runner_startup_failure_invalidates_candidate(self):
+        env = FakeEnv([{"x_pos": 10, "y_pos": 100, "rings": 0, "score": 0}] * 3)
+
+        with mock.patch("main.PolicyRunner", side_effect=RuntimeError("spawn failed")):
+            fitness, frames, max_x, reason, _, _, components = self.evaluate_silently(
+                env,
+                max_frames=3,
+            )
+
+        self.assertEqual((fitness, frames, max_x), (0.0, 0, 0))
+        self.assertIn("failed to start", reason.lower())
+        self.assertIn("runtime_error", components)
 
 
 if __name__ == "__main__":
