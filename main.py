@@ -1,4 +1,5 @@
 import argparse
+import ast
 import concurrent.futures
 import glob
 import hashlib
@@ -119,6 +120,25 @@ def build_stagnation_escape_context(working_fitness, last_trace, last_screenshot
         "last_trace": last_trace,
         "last_screenshot": last_screenshot,
     }
+
+
+def select_working_frontier_context(current_context, candidate_context, promoted):
+    """Keep mutation feedback aligned with the code that will be mutated next."""
+    return dict(candidate_context if promoted else current_context)
+
+
+def preserve_frontier_screenshot(
+    screenshot_path,
+    destination="artifacts/failures/working_frontier.png",
+):
+    """Copy a frontier image away from shared screenshot paths."""
+    if not screenshot_path or not os.path.exists(screenshot_path):
+        return screenshot_path
+    if os.path.abspath(screenshot_path) == os.path.abspath(destination):
+        return destination
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    shutil.copy2(screenshot_path, destination)
+    return destination
 
 
 def build_policy_load_failure(error):
@@ -492,6 +512,62 @@ def load_pool_codes(pool_dir="policies/pool"):
     return codes
 
 
+def build_frontier_guard_candidate(working_code, trace, sample_count=3, x_radius=25):
+    """Add one narrow recovery guard when the working policy repeatedly stalls."""
+    samples = list(trace or [])[-sample_count:]
+    if len(samples) < sample_count:
+        return None
+
+    zone = samples[-1].get("zone")
+    act = samples[-1].get("act")
+    xs = [int(sample.get("x", 0)) for sample in samples]
+    velocities = [abs(float(sample.get("x_velocity", 0) or 0)) for sample in samples]
+    if any((sample.get("zone"), sample.get("act")) != (zone, act) for sample in samples):
+        return None
+    if max(xs) - min(xs) > x_radius or max(velocities) >= 0.5:
+        return None
+
+    frontier_x = round(sum(xs) / len(xs))
+    marker = f"# FRONTIER_GUARD zone={zone} act={act} x={frontier_x}"
+    if marker in working_code:
+        return None
+
+    last_action = str(samples[-1].get("action", ""))
+    recovery_action = "RIGHT,B" if "DOWN" in last_action or "B" not in last_action else "RIGHT"
+
+    try:
+        tree = ast.parse(working_code)
+        function = next(
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "get_action"
+        )
+        first_body_line = function.body[0].lineno - 1
+    except (SyntaxError, StopIteration, IndexError):
+        return None
+
+    lines = working_code.splitlines(keepends=True)
+    indent = lines[first_body_line][:len(lines[first_body_line]) - len(lines[first_body_line].lstrip())]
+    lower = frontier_x - x_radius
+    upper = frontier_x + x_radius
+    guard = [
+        f"{indent}{marker}\n",
+        f"{indent}if (\n",
+        f"{indent}    state.get(\"zone\") == {zone!r}\n",
+        f"{indent}    and state.get(\"act\") == {act!r}\n",
+        f"{indent}    and {lower} <= state.get(\"x_pos\", 0) <= {upper}\n",
+        f"{indent}    and abs(state.get(\"x_velocity\", 0)) < 0.5\n",
+        f"{indent}):\n",
+        f"{indent}    return \"{recovery_action}\"\n",
+        "\n",
+    ]
+    candidate = "".join(lines[:first_body_line] + guard + lines[first_body_line:])
+    try:
+        validate_policy_source(candidate)
+    except Exception:
+        return None
+    return candidate
+
+
 def generate_candidates(
     mutator,
     working_code,
@@ -512,11 +588,18 @@ def generate_candidates(
     working policy so every slot is filled.
     """
     candidates_code = [None] * n_candidates
+    first_llm_slot = 0
+    frontier_guard = build_frontier_guard_candidate(working_code, last_trace)
+    if n_candidates > 0 and frontier_guard is not None:
+        print("Adding deterministic frontier-guard candidate.")
+        candidates_code[0] = (frontier_guard, "Deterministic frontier guard")
+        first_llm_slot = 1
+
     # max_workers=1 serialises requests so we never hammer a local LLM that
     # cannot service concurrent completions.
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         futures = {}
-        for c in range(n_candidates):
+        for c in range(first_llm_slot, n_candidates):
             parent_pair = None
             can_attempt_crossover = parent_selector is not None or len(pool_codes) >= 2
             if can_attempt_crossover and random.random() < crossover_probability:
@@ -618,25 +701,34 @@ def run_evaluation_loop(
     stagnation_counter = 0
     baseline_context = evaluate_working_baseline(env, working_path, mutator, max_frames, action_repeat=action_repeat)
     working_fitness = baseline_context["working_fitness"]
-    last_failure_reason = baseline_context["last_failure_reason"]
-    last_trace = baseline_context["last_trace"]
-    last_screenshot = baseline_context["last_screenshot"]
+    working_frontier = {
+        "failure_reason": baseline_context["last_failure_reason"],
+        "trace": baseline_context["last_trace"],
+        "screenshot": preserve_frontier_screenshot(baseline_context["last_screenshot"]),
+    }
     seed_population_baseline(population, working_path, baseline_context)
 
     end_gen = resolve_end_generation(start_gen, max_generations, generations)
     for gen in range(start_gen, end_gen + 1):
         print(f"\n--- Generation {gen} ---")
 
+        mutation_frontier = working_frontier
         if stagnation_counter >= stagnation_limit:
             print(
                 f"Stagnation detected ({stagnation_counter} gens without improvement). "
                 "Keeping the working champion and requesting a distinct strategy."
             )
-            escape = build_stagnation_escape_context(working_fitness, last_trace, last_screenshot)
+            escape = build_stagnation_escape_context(
+                working_fitness,
+                working_frontier["trace"],
+                working_frontier["screenshot"],
+            )
             working_fitness = escape["working_fitness"]
-            last_failure_reason = escape["last_failure_reason"]
-            last_trace = escape["last_trace"]
-            last_screenshot = escape["last_screenshot"]
+            mutation_frontier = {
+                "failure_reason": escape["last_failure_reason"],
+                "trace": escape["last_trace"],
+                "screenshot": escape["last_screenshot"],
+            }
             stagnation_counter = 0
 
         with open(working_path, 'r') as f:
@@ -657,10 +749,10 @@ def run_evaluation_loop(
         candidates_code = generate_candidates(
             mutator,
             working_code,
-            last_failure_reason,
-            last_screenshot,
+            mutation_frontier["failure_reason"],
+            mutation_frontier["screenshot"],
             recent_history,
-            last_trace,
+            mutation_frontier["trace"],
             n_candidates,
             pool_codes,
             parent_selector=population.select_parent_codes,
@@ -732,7 +824,10 @@ def run_evaluation_loop(
                 best_candidate_fitness = fitness
                 best_candidate_code = new_code
                 best_candidate_reason = failure_reason
-                best_candidate_screenshot = screenshot_path
+                best_candidate_screenshot = preserve_frontier_screenshot(
+                    screenshot_path,
+                    f"artifacts/failures/generation_{gen}_best.png",
+                )
                 best_candidate_reasoning = reasoning
                 best_candidate_trace = trace
                 best_candidate_components = components
@@ -753,6 +848,15 @@ def run_evaluation_loop(
             print(f"Working policy improved from {working_fitness:.2f} -> {best_candidate_fitness:.2f}")
             working_fitness = best_candidate_fitness
             stagnation_counter = 0
+            working_frontier = select_working_frontier_context(
+                working_frontier,
+                {
+                    "failure_reason": best_candidate_reason,
+                    "trace": best_candidate_trace,
+                    "screenshot": preserve_frontier_screenshot(best_candidate_screenshot),
+                },
+                promoted=True,
+            )
 
             # Update working file
             with open(working_path, 'w') as f:
@@ -801,10 +905,6 @@ def run_evaluation_loop(
 
             # We log the generation even if it failed so the dashboard updates
             history.log_generation(gen, working_path, best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
-
-        last_failure_reason = best_candidate_reason
-        last_trace = best_candidate_trace
-        last_screenshot = best_candidate_screenshot
 
 
 def main(argv=None):

@@ -413,10 +413,11 @@ Here is the current code that failed:
 {current_code}
 ```
 
-Failure Reason: {failure_reason}
+Primary Failure Reason (the working policy's own frontier): {failure_reason}
 {trace_text}
 
-Recent History of Failures:
+Recent History of Other Evaluated Candidates (background only; these failures
+may not apply to the current code):
 {history_text}
 
 {lessons_text}
@@ -431,6 +432,8 @@ CRITICAL — preserve progress: the current code already makes real progress bef
 fails. Keep its existing working logic and structure intact and change the SMALLEST
 amount needed to get past the specific failure shown above. Do NOT delete working
 rules or rewrite unrelated sections, or you will regress earlier progress.
+Fix the primary working-policy frontier first. Do not modify the current code solely
+to address a failure listed in the other-candidate history.
 Note that `x_pos` resets to ~0 at the start of each act and `state['zone']`/`state['act']`
 tell you which act you are in — when handling a NEW act, prefer general
 velocity/vision-based logic over hardcoded x-coordinates (which only apply to one act).
