@@ -74,12 +74,13 @@ python efficiency_report.py --usd-per-call 0.005 --latency 2.0  # project in-loo
 ## Resilience Features
 
 To ensure the pipeline can run continuously without manual intervention:
-1.  **Syntax Error Sandboxing**: The dynamic Python code loader is wrapped in error handling. If the LLM generates invalid code (e.g., a SyntaxError), the pipeline catches it, assigns the candidate a fitness score of `0.0`, and continues running seamlessly.
-2.  **Runaway-Policy Timeout**: Each `get_action` call runs on a dedicated daemon worker thread (`core/policy_runner.py`) with a hard wall-clock timeout. If an evolved policy contains an infinite loop, the candidate is abandoned and scored as a failure instead of spinning a CPU core forever or hanging the process on exit.
-3.  **Stateful Emulator Recording**: We manually enforce video buffer flushing by calling an extra `env.reset()` before teardown, ensuring that the emulator correctly writes the `.bk2` video files to disk even if the episode is manually terminated early.
-4.  **Aggressive Cache Breaking**: Mutator prompts are seeded with a randomized cryptographically secure string to prevent local LLMs from entering endless prompt-caching loops.
+1.  **Policy Preflight Validation**: Before generated Python is imported, an AST validator checks syntax, requires a top-level `get_action(state)`, restricts imports to the optional `policies.skills` library, rejects executable top-level statements, and blocks obvious filesystem/code-execution builtins. Invalid candidates receive a fitness score of `0.0` and the pipeline continues.
+2.  **Bounded Validator Repair**: A candidate that fails preflight is archived with its exact validator error, then sent to the local code model for one targeted repair. The repaired source is validated once and either evaluated normally or scored as a load failure; repairs never recurse and never invoke the vision model.
+3.  **Runaway-Policy Timeout**: Each `get_action` call runs on a dedicated daemon worker thread (`core/policy_runner.py`) with a hard wall-clock timeout. If an evolved policy contains an infinite loop, the candidate is abandoned and scored as a failure instead of spinning a CPU core forever or hanging the process on exit.
+4.  **Stateful Emulator Recording**: We manually enforce video buffer flushing by calling an extra `env.reset()` before teardown, ensuring that the emulator correctly writes the `.bk2` video files to disk even if the episode is manually terminated early.
+5.  **Aggressive Cache Breaking**: Mutator prompts are seeded with a randomized cryptographically secure string to prevent local LLMs from entering endless prompt-caching loops.
 
-> ⚠️ **Security note:** evolved policies are arbitrary LLM-generated Python that is `exec`'d **in-process** with your full user privileges (`load_policy` in `main.py`). The timeout above bounds runtime, but it does **not** sandbox filesystem or network access. Run the pipeline only in a trusted/isolated environment (e.g. a container or VM), and review generated `policies/` before reusing them elsewhere.
+> ⚠️ **Security note:** evolved policies still run **in-process** with your full user privileges (`load_policy` in `main.py`). The AST preflight blocks obvious dangerous constructs and the timeout bounds runtime, but neither is a complete sandbox. Run the pipeline only in a trusted/isolated environment (e.g. a container or VM), and review generated `policies/` before reusing them elsewhere.
 
 ## Setup
 
@@ -146,6 +147,18 @@ This rewards a policy that *generalizes* across levels rather than one overfit t
 Mutation prompts receive compact frame traces with position, velocity, zone/act, rings, vision context, and the action taken. Fatal visual failures also use a small recent-frame montage when screenshots are available, giving the macro model more context than a single final frame.
 
 The policy pool keeps a small amount of action-signature diversity instead of pruning strictly by score, so crossover has access to policies with different controller habits.
+
+Every evaluated candidate is also retained in a structured population archive
+under `artifacts/population/`, including candidates that do not beat the current
+working policy. The archive deduplicates identical policy code, preserves the
+best observed result and failure context, and tracks behavior/obstacle
+specialists. Crossover parents are selected from this archive with a P-UCB-style
+score that balances measured fitness with an exploration bonus for policies
+that have been sampled less often. The evaluated working champion is admitted
+before the first generation so early crossovers retain a strong parent.
+Stagnation resets exploration context without discarding that champion. The
+smaller legacy policy pool remains a fallback while a new archive is being
+populated.
 
 ## Emulator Backends
 

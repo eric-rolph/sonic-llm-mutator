@@ -16,6 +16,8 @@ from core.actions import action_string_to_array
 from core.evaluator import calculate_fitness
 from core.history import EvolutionHistory
 from core.policy_runner import PolicyRunner, PolicyTimeout
+from core.policy_validator import validate_policy_source
+from core.population import PopulationArchive
 from core.trace_context import build_screenshot_montage, build_trace_entry
 from llm.mutator import MutatorClient
 
@@ -38,6 +40,8 @@ STUCK_FRAME_LIMIT = 500
 
 def load_policy(filepath):
     """Loads a python script dynamically."""
+    with open(filepath, "r", encoding="utf-8") as f:
+        validate_policy_source(f.read())
     spec = importlib.util.spec_from_file_location("current_policy", filepath)
     policy_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(policy_module)
@@ -50,6 +54,7 @@ def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbo
         "last_failure_reason": "Initial seed run",
         "last_screenshot": None,
         "last_trace": [],
+        "components": {},
     }
     if env is None or not os.path.exists(working_path):
         return context
@@ -79,9 +84,40 @@ def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbo
             "last_failure_reason": failure_reason,
             "last_screenshot": screenshot_path,
             "last_trace": trace,
+            "components": components,
         }
     )
     return context
+
+
+def seed_population_baseline(archive, working_path, baseline_context):
+    """Admit the evaluated working policy so early crossover has a strong parent."""
+    if baseline_context.get("working_fitness", -1.0) < 0 or not os.path.exists(working_path):
+        return False
+    with open(working_path, "r", encoding="utf-8") as f:
+        code = f.read()
+    return record_candidate_evaluation(
+        archive,
+        code,
+        baseline_context["working_fitness"],
+        baseline_context.get("components", {}),
+        baseline_context.get("last_failure_reason", "Working policy baseline"),
+        baseline_context.get("last_trace", []),
+        "Working policy baseline",
+    )
+
+
+def build_stagnation_escape_context(working_fitness, last_trace, last_screenshot):
+    """Preserve the champion while asking mutations to explore a distinct strategy."""
+    return {
+        "working_fitness": working_fitness,
+        "last_failure_reason": (
+            "Stagnation plateau: preserve the current working policy, but try a distinct "
+            "minimal strategy that is not already represented in recent candidates."
+        ),
+        "last_trace": last_trace,
+        "last_screenshot": last_screenshot,
+    }
 
 
 def build_policy_load_failure(error):
@@ -102,6 +138,86 @@ def clear_candidate_recording(record_dir, candidate_idx):
     candidate_bk2_path = os.path.join(record_dir, f"candidate_{candidate_idx}.bk2")
     if os.path.exists(candidate_bk2_path):
         os.remove(candidate_bk2_path)
+
+
+def record_candidate_evaluation(
+    archive,
+    code,
+    fitness,
+    components,
+    failure_reason,
+    trace,
+    reasoning,
+):
+    """Record a candidate without allowing archive failures to stop training."""
+    try:
+        archive.record_evaluation(
+            code,
+            fitness=fitness,
+            components=components,
+            failure_reason=failure_reason,
+            trace=trace,
+            reasoning=reasoning,
+        )
+        return True
+    except Exception as e:
+        print(f"Failed to record candidate in population archive: {e}")
+        return False
+
+
+def prepare_candidate_policy(candidate_path, code, reasoning, mutator, archive):
+    """Load a candidate, making at most one local repair after validation failure."""
+    with open(candidate_path, "w", encoding="utf-8") as f:
+        f.write(code)
+
+    try:
+        policy = load_policy(candidate_path)
+        return {
+            "code": code,
+            "reasoning": reasoning,
+            "policy": policy,
+            "load_error": None,
+        }
+    except Exception as original_error:
+        original_error_text = str(original_error)
+        record_candidate_evaluation(
+            archive,
+            code,
+            0.0,
+            {"load_error": original_error_text, "repair_stage": "original"},
+            f"Policy failed to load before repair: {original_error_text}",
+            [],
+            reasoning,
+        )
+
+    try:
+        repaired_code, repair_reasoning = mutator.repair_policy(code, original_error_text)
+    except Exception as repair_error:
+        return {
+            "code": code,
+            "reasoning": reasoning,
+            "policy": None,
+            "load_error": repair_error,
+        }
+
+    repaired_code = str(repaired_code or "")
+    repair_reasoning = str(repair_reasoning or "")
+    combined_reasoning = f"{reasoning}\nValidator repair: {repair_reasoning}".strip()
+    with open(candidate_path, "w", encoding="utf-8") as f:
+        f.write(repaired_code)
+    try:
+        repaired_policy = load_policy(candidate_path)
+        repaired_error = None
+    except Exception as e:
+        repaired_policy = None
+        repaired_error = e
+
+    return {
+        "code": repaired_code,
+        "reasoning": combined_reasoning,
+        "policy": repaired_policy,
+        "load_error": repaired_error,
+    }
 
 
 def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_repeat=1):
@@ -385,6 +501,7 @@ def generate_candidates(
     n_candidates,
     pool_codes,
     crossover_probability=0.30,
+    parent_selector=None,
 ):
     """Request ``n_candidates`` new policies from the mutator.
 
@@ -399,11 +516,25 @@ def generate_candidates(
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         futures = {}
         for c in range(n_candidates):
-            if len(pool_codes) >= 2 and random.random() < crossover_probability:
+            parent_pair = None
+            can_attempt_crossover = parent_selector is not None or len(pool_codes) >= 2
+            if can_attempt_crossover and random.random() < crossover_probability:
                 print(f"Requesting Crossover {c+1}/{n_candidates} (FunSearch)...")
-                parent_a, parent_b = random.sample(pool_codes, 2)
+                if parent_selector is not None:
+                    try:
+                        parent_pair = parent_selector()
+                    except Exception as e:
+                        print(f"Population parent selection failed: {e}")
+                if parent_pair is None and len(pool_codes) >= 2:
+                    parent_pair = random.sample(pool_codes, 2)
+
+            if parent_pair is not None:
                 future = executor.submit(
-                    mutator.crossover_policies, parent_a, parent_b, recent_history, temperature=0.7
+                    mutator.crossover_policies,
+                    parent_pair[0],
+                    parent_pair[1],
+                    recent_history,
+                    temperature=0.7,
                 )
             else:
                 temperature = 0.7 if c == 0 else 0.9
@@ -437,6 +568,7 @@ def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, s
     # so the larger budget only costs wall-clock for genuinely good runs.
     history = EvolutionHistory()
     mutator = MutatorClient()
+    population = PopulationArchive()
 
     try:
         from emulator.sonic_env import SonicEnvWrapper
@@ -475,17 +607,22 @@ def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, s
     last_failure_reason = baseline_context["last_failure_reason"]
     last_trace = baseline_context["last_trace"]
     last_screenshot = baseline_context["last_screenshot"]
+    seed_population_baseline(population, working_path, baseline_context)
 
     for gen in range(start_gen, max_generations + 1):
         print(f"\n--- Generation {gen} ---")
 
         if stagnation_counter >= stagnation_limit:
-            print(f"Stagnation detected ({stagnation_counter} gens without improvement). Triggering blankRestart!")
-            mutator.write_seed_policy(working_path)
-            working_fitness = -1.0
+            print(
+                f"Stagnation detected ({stagnation_counter} gens without improvement). "
+                "Keeping the working champion and requesting a distinct strategy."
+            )
+            escape = build_stagnation_escape_context(working_fitness, last_trace, last_screenshot)
+            working_fitness = escape["working_fitness"]
+            last_failure_reason = escape["last_failure_reason"]
+            last_trace = escape["last_trace"]
+            last_screenshot = escape["last_screenshot"]
             stagnation_counter = 0
-            last_failure_reason = "blankRestart due to stagnation"
-            last_trace = []
 
         with open(working_path, 'r') as f:
             working_code = f.read()
@@ -511,6 +648,7 @@ def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, s
             last_trace,
             n_candidates,
             pool_codes,
+            parent_selector=population.select_parent_codes,
         )
 
         # Evaluate candidates
@@ -518,16 +656,19 @@ def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, s
             print(f"\nEvaluating Candidate {c+1}...")
             candidate_path = os.path.join("policies", f"candidate_{c}.py")
             clear_candidate_recording("artifacts/videos/tmp", c)
-            with open(candidate_path, 'w') as f:
-                f.write(new_code)
-
-            load_error = None
-            try:
-                policy = load_policy(candidate_path)
-            except Exception as e:
-                print(f"Failed to load policy (SyntaxError?): {e}")
-                load_error = e
-                policy = None
+            prepared = prepare_candidate_policy(
+                candidate_path,
+                new_code,
+                reasoning,
+                mutator,
+                population,
+            )
+            new_code = prepared["code"]
+            reasoning = prepared["reasoning"]
+            policy = prepared["policy"]
+            load_error = prepared["load_error"]
+            if load_error is not None:
+                print(f"Failed to load policy after one repair attempt: {load_error}")
 
             if env is None:
                 fitness = 0.0
@@ -561,6 +702,16 @@ def run_evaluation_loop(max_generations=500, max_frames=12000, n_candidates=2, s
                         os.remove(candidate_bk2_path)
                     if candidate_bk2_path != latest_bk2:
                         os.rename(latest_bk2, candidate_bk2_path)
+
+            record_candidate_evaluation(
+                population,
+                new_code,
+                fitness,
+                components,
+                failure_reason,
+                trace,
+                reasoning,
+            )
 
             if fitness > best_candidate_fitness:
                 best_candidate_fitness = fitness

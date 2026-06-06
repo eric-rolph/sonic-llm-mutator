@@ -96,7 +96,10 @@ with col1:
             st.header("⚠️ Stagnation Monitor")
             stag_count = latest.get("stagnation_counter", 0)
             if stag_count > 3:
-                st.error(f"Stagnation Level: {stag_count}/5\nA blankRestart mutation is imminent!")
+                st.warning(
+                    f"Stagnation Level: {stag_count}/5\n"
+                    "The champion will be preserved while the mutator explores a distinct strategy."
+                )
             elif stag_count > 0:
                 st.warning(f"Stagnation Level: {stag_count}/5\nThe AI is struggling to beat the champion.")
             else:

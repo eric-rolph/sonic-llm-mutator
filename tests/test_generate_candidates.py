@@ -11,6 +11,7 @@ class FakeMutator:
     def __init__(self):
         self.mutate_calls = 0
         self.crossover_calls = 0
+        self.parent_pairs = []
 
     def mutate_policy(self, code, reason, screenshot, history, temperature, trace):
         self.mutate_calls += 1
@@ -18,6 +19,7 @@ class FakeMutator:
 
     def crossover_policies(self, parent_a, parent_b, history, temperature=0.7):
         self.crossover_calls += 1
+        self.parent_pairs.append((parent_a, parent_b))
         return "# crossover", "crossed"
 
 
@@ -52,6 +54,30 @@ class GenerateCandidatesTests(unittest.TestCase):
         )
         self.assertEqual(mutator.crossover_calls, 2)
         self.assertEqual(mutator.mutate_calls, 0)
+
+    def test_prefers_exploration_aware_parent_selector_for_crossover(self):
+        mutator = FakeMutator()
+        selector_calls = []
+
+        def select_parents():
+            selector_calls.append(True)
+            return "# archived parent a", "# archived parent b"
+
+        generate_silently(
+            mutator,
+            "WORKING",
+            "reason",
+            None,
+            [],
+            [],
+            1,
+            ["# legacy a", "# legacy b"],
+            crossover_probability=1.0,
+            parent_selector=select_parents,
+        )
+
+        self.assertEqual(selector_calls, [True])
+        self.assertEqual(mutator.parent_pairs, [("# archived parent a", "# archived parent b")])
 
     def test_failed_request_falls_back_to_working_policy(self):
         result = generate_silently(

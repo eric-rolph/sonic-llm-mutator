@@ -96,7 +96,7 @@ class MutatorMemoryTests(unittest.TestCase):
                 self.called.append("micro")
                 return "def get_action(state):\n    return 'RIGHT'", "micro"
 
-            def _call_macro_model(self, prompt, image_path):
+            def _call_macro_model(self, prompt, image_path, temperature=0.7):
                 self.called.append("macro")
                 return "def get_action(state):\n    return 'LEFT'", "macro"
 
@@ -122,7 +122,7 @@ class MutatorMemoryTests(unittest.TestCase):
                 self.called.append("micro")
                 return "code", "micro"
 
-            def _call_macro_model(self, prompt, image_path):
+            def _call_macro_model(self, prompt, image_path, temperature=0.7):
                 self.called.append("macro")
                 return "code", "macro"
 
@@ -149,6 +149,47 @@ class MutatorMemoryTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             mutator.mutate_policy("code", stuck, None, [])
         self.assertEqual(mutator.called, ["micro"])
+
+    def test_repair_policy_uses_local_model_with_exact_validator_feedback(self):
+        class RecordingMutator(MutatorClient):
+            def __init__(self):
+                self.prompts = []
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                self.prompts.append((prompt, temperature))
+                return "```python\ndef get_action(state):\n    return 'RIGHT'\n```", "fixed"
+
+        mutator = RecordingMutator()
+
+        with redirect_stdout(StringIO()):
+            code, reasoning = mutator.repair_policy(
+                "def broken(:\n    pass",
+                "Policy syntax error: invalid syntax",
+            )
+
+        self.assertEqual(len(mutator.prompts), 1)
+        self.assertIn("Policy syntax error: invalid syntax", mutator.prompts[0][0])
+        self.assertIn("def broken(", mutator.prompts[0][0])
+        self.assertEqual(mutator.prompts[0][1], 0.2)
+        self.assertEqual(code, "def get_action(state):\n    return 'RIGHT'")
+        self.assertEqual(reasoning, "fixed")
+
+    def test_macro_fallback_preserves_requested_mutation_temperature(self):
+        class RecordingMutator(MutatorClient):
+            def __init__(self):
+                self.macro_client = None
+                self.temperatures = []
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                self.temperatures.append(temperature)
+                return "code", "local"
+
+        mutator = RecordingMutator()
+
+        with redirect_stdout(StringIO()):
+            mutator._call_macro_model("prompt", "shot.png", temperature=0.9)
+
+        self.assertEqual(mutator.temperatures, [0.9])
 
 
 if __name__ == "__main__":

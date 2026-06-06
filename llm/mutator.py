@@ -185,21 +185,21 @@ def get_action(state):
         mime_type = mime_type or "image/png"
         return f"data:{mime_type};base64,{self._encode_image(image_path)}"
 
-    def _call_macro_model(self, prompt, image_path):
+    def _call_macro_model(self, prompt, image_path, temperature=0.7):
         """Calls Cloud LLM for Macro-Mutations (needs vision)."""
         if not image_path:
             print("No screenshot available, falling back to local Micro-Mutation model.")
-            return self._call_micro_model(prompt)
+            return self._call_micro_model(prompt, temperature)
         if not self.macro_client:
             print("No MACRO_API_KEY found, falling back to local Micro-Mutation model.")
-            return self._call_micro_model(prompt)
+            return self._call_micro_model(prompt, temperature)
 
         print(f"Using Cloud API ({self.macro_model}) for Macro-Mutation.")
         try:
             return self._do_macro_call(prompt, image_path)
         except Exception as e:
             print(f"Cloud API failed after retries: {e}")
-            return self._call_micro_model(prompt)
+            return self._call_micro_model(prompt, temperature)
 
     @retry(
         wait=wait_exponential(multiplier=2, min=2, max=60),
@@ -451,7 +451,7 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         if "timeout" in failure_reason.lower() or not screenshot_path:
             raw_response, reasoning = self._call_micro_model(prompt, temperature)
         else:
-            raw_response, reasoning = self._call_macro_model(prompt, screenshot_path)
+            raw_response, reasoning = self._call_macro_model(prompt, screenshot_path, temperature)
 
         # Clean up markdown if the LLM wrapped it anyway
         print(f"Raw Response from LLM (mutate): {repr(raw_response)}")
@@ -461,6 +461,35 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
             parts = raw_response.split("```")
             raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
 
+        return raw_response, reasoning
+
+    def repair_policy(self, candidate_code, validation_error):
+        """Use the local code model once to repair an exact validator failure."""
+        prompt = f"""
+The generated Sonic policy below failed deterministic preflight validation.
+
+Invalid candidate:
+```python
+{candidate_code}
+```
+
+Exact validator feedback:
+{validation_error}
+
+Repair ONLY the validation failure while preserving the candidate's intended
+behavior and structure. The result must define a top-level `get_action(state)`.
+Imports are forbidden except optional `import policies.skills as skills`.
+Do not use filesystem, process, network, dynamic-code-execution, or dunder APIs.
+
+Return ONLY valid Python code, starting with `def get_action(state):` or the
+optional allowed skills import followed by that function.
+"""
+        raw_response, reasoning = self._call_micro_model(prompt, temperature=0.2)
+        if "```python" in raw_response:
+            raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
+        elif "```" in raw_response:
+            parts = raw_response.split("```")
+            raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
         return raw_response, reasoning
 
     def crossover_policies(self, policy_a_code, policy_b_code, recent_history, temperature=0.7):
