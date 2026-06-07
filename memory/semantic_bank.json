@@ -258,5 +258,90 @@
         "x": 2164,
         "hazard": "Lack of momentum/Slow progress",
         "lesson": "Maintain high x_velocity by consistently holding RIGHT and using jumps to clear obstacles instead of slowing down."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If x_velocity remains 0 while pressing RIGHT,B at X=3061, vary the action (e.g., try B or UP) to break the stall."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When forward progress stops around X=3061, ensure a jump (B) is combined with RIGHT and sufficient momentum to clear the obstacle."
+    },
+    {
+        "x": 2300,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When forward progress stalls (low or negative x_velocity) despite pressing RIGHT, incorporate more aggressive jumping or vary movement to overcome geometry."
+    },
+    {
+        "x": 2340,
+        "hazard": "Vertical Wall/Ledge",
+        "lesson": "When forward progress stalls and x_velocity becomes negative while pressing RIGHT at X=2340, prioritize a jump (B) to clear potential vertical obstacles."
+    },
+    {
+        "x": 2360,
+        "hazard": "Wall/Ledge",
+        "lesson": "When forward progress stalls near X=2360 in Zone 0 Act 1, use 'RIGHT,B' or 'B' to jump over the obstacle instead of just holding RIGHT."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When forward progress stops around X=3061, use 'RIGHT,B' or 'B' more effectively to jump over the obstacle instead of just holding RIGHT."
+    },
+    {
+        "x": 2350,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When forward progress is stalled and x_velocity becomes negative around X=2350 in Zone 0 Act 1, use 'RIGHT,UP,B' to jump over the obstacle instead of just running into it."
+    },
+    {
+        "x": 2350,
+        "hazard": "Wall/Ledge",
+        "lesson": "When forward progress stalls around X=2350 in Zone 0 Act 1, use a combination of jumping and momentum or the spin dash (DOWN, B) to overcome the obstacle."
+    },
+    {
+        "x": 2350,
+        "hazard": "Wall/Geometry",
+        "lesson": "When forward progress stalls (x_velocity near 0) while moving RIGHT around X=2350 in Zone 0 Act 1, perform a jump ('RIGHT,B') to clear the obstacle."
+    },
+    {
+        "x": 2350,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If forward progress stalls and x_velocity becomes negative while moving RIGHT, execute a jump (B) with higher velocity to clear the barrier."
+    },
+    {
+        "x": 2350,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When progress stalls around X=2350 in Zone 0 Act 1, avoid jumping (B) if x_velocity is negative to prevent bouncing backward; prioritize consistent RIGHT movement."
+    },
+    {
+        "x": 2350,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When forward progress stalls and x_velocity becomes negative around X=2350, avoid repetitive jumping into walls and ensure higher momentum before attempting to clear the obstacle."
+    },
+    {
+        "x": 3061,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When x_velocity is 0 while attempting to move RIGHT at X=3061, incorporate a jump (B) or change action sequence to avoid getting stuck against geometry."
+    },
+    {
+        "x": 2350,
+        "hazard": "Wall/Obstacle",
+        "lesson": "When forward progress stalls or reverses despite holding RIGHT, execute a jump ('RIGHT,B') to clear the obstacle."
+    },
+    {
+        "x": 2350,
+        "hazard": "Wall/Pit Pocket",
+        "lesson": "When forward progress stalls (x_velocity near 0) around X=2350 in Zone 0 Act 1, prioritize consistent 'RIGHT,B' jumps to clear vertical obstacles or escape dips."
+    },
+    {
+        "x": 2350,
+        "hazard": "Wall/Ledge",
+        "lesson": "When forward progress stalls around x=2350 in Zone 0 Act 1, use a jump (RIGHT,B) to clear the obstacle instead of just holding RIGHT."
+    },
+    {
+        "x": 2360,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If x_velocity remains near zero while pressing RIGHT in Green Hill Act 1, perform a jump (B) to overcome the obstacle."
     }
 ]
