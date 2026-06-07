@@ -318,7 +318,9 @@ class MutatorMemoryTests(unittest.TestCase):
                     )
 
                 with open("policies/skills.py", "r", encoding="utf-8") as f:
-                    self.assertEqual(f.read(), existing)
+                    content = f.read()
+                    self.assertIn("def existing(state):", content)
+                    self.assertIn("def replacement(state):", content)
             finally:
                 os.chdir(previous_cwd)
 

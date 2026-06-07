@@ -398,26 +398,42 @@ Return ONLY valid Python code containing the updated skill library (the existing
                     parts = new_skills_code.split("```")
                     new_skills_code = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
 
-                validate_skills_source(new_skills_code)
                 existing_functions = _top_level_functions(existing_skills)
                 new_functions = _top_level_functions(new_skills_code)
-                missing_functions = existing_functions.keys() - new_functions.keys()
-                if missing_functions:
-                    raise ValueError(
-                        "Extracted skills removed existing functions: "
-                        + ", ".join(sorted(missing_functions))
-                    )
+                
+                new_ast = ast.parse(new_skills_code)
+                added_funcs_code = []
+                for node in new_ast.body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if node.name not in existing_functions:
+                            source = ast.get_source_segment(new_skills_code, node)
+                            if source:
+                                added_funcs_code.append(source)
+                
                 changed_functions = {
                     name
                     for name, definition in existing_functions.items()
-                    if new_functions[name] != definition
+                    if name in new_functions and new_functions[name] != definition
                 }
                 if changed_functions:
-                    raise ValueError(
-                        "Extracted skills changed existing functions: "
+                    print(
+                        "Note: Extracted skills tried to update existing functions (ignored): "
                         + ", ".join(sorted(changed_functions))
                     )
-                _atomic_write_text(skills_path, new_skills_code)
+                
+                if not added_funcs_code:
+                    print("No new skills extracted.")
+                    return
+                
+                combined_skills = existing_skills
+                if combined_skills and not combined_skills.endswith("\n"):
+                    combined_skills += "\n"
+                if combined_skills:
+                    combined_skills += "\n\n"
+                combined_skills += "\n\n".join(added_funcs_code) + "\n"
+                
+                validate_skills_source(combined_skills)
+                _atomic_write_text(skills_path, combined_skills)
                 importlib.invalidate_caches()
                 loaded_skills = sys.modules.get("policies.skills")
                 try:
