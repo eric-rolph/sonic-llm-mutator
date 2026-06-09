@@ -1,9 +1,9 @@
 import argparse
-import importlib.util
 import json
 import os
 from pathlib import Path
 
+from core.policy_loader import load_policy
 from main import evaluate_policy
 
 DEFAULT_STATES = [
@@ -44,22 +44,11 @@ def policy_label(policy_path):
     return Path(policy_path).stem
 
 
-def load_policy(policy_path):
-    path = Path(policy_path)
-    module_name = f"benchmark_{path.stem}_{abs(hash(str(path.resolve()))) % 1000000}"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ValueError(f"Could not load policy: {policy_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not hasattr(module, "get_action"):
-        raise ValueError(f"Policy does not define get_action: {policy_path}")
-    return module
-
-
 def evaluate_policy_on_state(policy_path, state, max_frames, backend="auto", action_repeat=1):
     from emulator.sonic_env import SonicEnvWrapper
 
+    # Same validated, restricted-builtins loader as the training loop: the
+    # benchmark must not be a privileged side door for generated code.
     policy = load_policy(policy_path)
     env = SonicEnvWrapper(state=state, record_path=None, backend=backend)
     try:
