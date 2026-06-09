@@ -12,7 +12,7 @@ from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from core.policy_validator import validate_skills_source
-from core.trace_context import trace_entry_x
+from core.trace_context import trace_entry_x, trace_entry_zone_act
 from llm.prompts import SYSTEM_PROMPT
 
 
@@ -68,8 +68,44 @@ def extract_json_object(text):
     return None
 
 
+# Hard cap on stored lessons; oldest entries are dropped beyond this.
+MAX_SEMANTIC_LESSONS = 100
+
+# Ordered keyword buckets for collapsing the LLM's freeform hazard names
+# ("Wall/Ledge", "Vertical stuck loop", "Pitfall", ...) into a small category
+# set so paraphrased lessons about the same obstacle deduplicate.
+_HAZARD_CATEGORIES = (
+    ("pit", ("pit", "fall", "hole", "gap", "chasm")),
+    ("spikes", ("spike",)),
+    ("enemy", ("enemy", "badnik", "robot", "crab", "buzz", "chopper", "motobug")),
+    ("water", ("water", "drown")),
+    (
+        "wall",
+        (
+            "wall", "ledge", "obstacle", "stuck", "stall", "stagnation",
+            "geometry", "slope", "dip", "loop", "bounce", "deadlock",
+            "collision", "barrier", "vertical",
+        ),
+    ),
+)
+
+
+def hazard_category(hazard, lesson_text=""):
+    """Map a freeform hazard description to a coarse category name."""
+    for blob in (str(hazard or "").lower(), str(lesson_text or "").lower()):
+        for category, needles in _HAZARD_CATEGORIES:
+            if any(needle in blob for needle in needles):
+                return category
+    return "other"
+
+
 def normalize_lesson(entry):
-    """Return a compact semantic lesson dict, or None for malformed entries."""
+    """Return a compact semantic lesson dict, or None for malformed entries.
+
+    ``zone``/``act`` are kept when parseable so lessons can be scoped to the
+    act their x coordinate belongs to (x resets to ~0 every act). Lessons
+    without them are legacy entries treated as applying anywhere.
+    """
     if not isinstance(entry, dict):
         return None
     try:
@@ -82,28 +118,45 @@ def normalize_lesson(entry):
         return None
 
     hazard = str(entry.get("hazard", "Unknown")).strip() or "Unknown"
-    return {"x": x, "hazard": hazard, "lesson": lesson}
+    normalized = {"x": x, "hazard": hazard, "lesson": lesson}
+    for key in ("zone", "act"):
+        try:
+            normalized[key] = int(float(entry[key]))
+        except (KeyError, TypeError, ValueError):
+            pass
+    return normalized
+
+
+def lesson_semantic_key(lesson, x_bucket_size=25):
+    """Cluster key: same zone/act, same x bucket, same hazard category."""
+    bucket = max(1, int(x_bucket_size))
+    return (
+        lesson.get("zone"),
+        lesson.get("act"),
+        int(lesson["x"]) // bucket,
+        hazard_category(lesson.get("hazard", ""), lesson.get("lesson", "")),
+    )
 
 
 def dedupe_lessons(lessons, x_tolerance=25):
-    """Collapse malformed and duplicate nearby lessons while preserving order."""
+    """Collapse malformed entries and semantically duplicate lessons.
+
+    Earlier dedupe only collapsed *case-identical* text, so every paraphrase of
+    "you are stuck at x=3061, jump" accumulated and crowded the prompt's lesson
+    budget. Lessons now deduplicate by (zone, act, x bucket, hazard category);
+    the first occurrence wins and order is preserved.
+    """
     deduped = []
+    seen = set()
     for lesson in lessons:
         normalized = normalize_lesson(lesson)
         if normalized is None:
             continue
-
-        lesson_key = normalized["lesson"].casefold()
-        duplicate = False
-        for existing in deduped:
-            if (
-                abs(existing["x"] - normalized["x"]) <= x_tolerance
-                and existing["lesson"].casefold() == lesson_key
-            ):
-                duplicate = True
-                break
-        if not duplicate:
-            deduped.append(normalized)
+        key = lesson_semantic_key(normalized, x_tolerance)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
     return deduped
 
 
@@ -120,10 +173,26 @@ def load_semantic_bank(path="memory/semantic_bank.json"):
     return dedupe_lessons(raw_bank)
 
 
-def select_relevant_lessons(lessons, current_x, radius=1000, limit=10):
+def select_relevant_lessons(lessons, current_x, radius=1000, limit=10, zone=None, act=None):
+    """Pick lessons near ``current_x`` that apply to the current zone/act.
+
+    x coordinates are only meaningful within one act, so lessons tagged with a
+    zone/act are excluded outside it. Legacy untagged lessons (and callers that
+    do not know the current act) keep the old anywhere-matching behaviour.
+    """
     relevant = []
     for lesson in dedupe_lessons(lessons):
-        if abs(lesson["x"] - current_x) <= radius:
+        if abs(lesson["x"] - current_x) > radius:
+            continue
+        lesson_zone = lesson.get("zone")
+        lesson_act = lesson.get("act")
+        if zone is not None and lesson_zone is not None and lesson_zone != zone:
+            continue
+        if act is not None and lesson_act is not None and lesson_act != act:
+            continue
+        if lesson_zone is not None and lesson_act is not None:
+            relevant.append(f"- [zone {lesson_zone} act {lesson_act}] {lesson['lesson']}")
+        else:
             relevant.append(f"- {lesson['lesson']}")
     return relevant[-limit:]
 
@@ -317,11 +386,20 @@ Return ONLY a valid JSON object in this exact format:
             print("Failed to parse semantic lesson JSON.")
             return
 
+        # Stamp zone/act from the trace (authoritative emulator state) rather
+        # than trusting the model: x coordinates only mean anything per-act.
+        if coordinate_trace:
+            zone, act = trace_entry_zone_act(coordinate_trace[-1])
+            if zone is not None:
+                lesson_data["zone"] = zone
+            if act is not None:
+                lesson_data["act"] = act
+
         os.makedirs("memory", exist_ok=True)
         bank_path = "memory/semantic_bank.json"
         bank = load_semantic_bank(bank_path)
         bank.append(lesson_data)
-        bank = dedupe_lessons(bank)
+        bank = dedupe_lessons(bank)[-MAX_SEMANTIC_LESSONS:]
         with open(bank_path, "w", encoding="utf-8") as f:
             json.dump(bank, f, indent=4)
         print(f"Extracted and saved semantic lesson: {lesson_data.get('lesson')}")
@@ -458,16 +536,25 @@ Return ONLY valid Python code containing the updated skill library (the existing
         history_text = json.dumps(recent_history, indent=2)
         trace_text = ""
         current_x = 0
+        current_zone, current_act = None, None
         if coordinate_trace:
             trace_text = f"Recent frame trace leading to failure: {coordinate_trace}"
             if len(coordinate_trace) > 0:
                 current_x = trace_entry_x(coordinate_trace[-1])
+                current_zone, current_act = trace_entry_zone_act(coordinate_trace[-1])
 
         lessons_text = ""
         if os.path.exists("memory/semantic_bank.json"):
             try:
                 bank = load_semantic_bank("memory/semantic_bank.json")
-                relevant_lessons = select_relevant_lessons(bank, current_x, radius=1000, limit=10)
+                relevant_lessons = select_relevant_lessons(
+                    bank,
+                    current_x,
+                    radius=1000,
+                    limit=10,
+                    zone=current_zone,
+                    act=current_act,
+                )
                 if relevant_lessons:
                     lessons_text = "Relevant Semantic Memory (CRITICAL - DO NOT VIOLATE):\n" + "\n".join(relevant_lessons)
             except Exception as e:
