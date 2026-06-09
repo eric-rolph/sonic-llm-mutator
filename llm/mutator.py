@@ -204,6 +204,27 @@ def normalize_vision_context(content):
     return normalized or "UNKNOWN"
 
 
+VISION_SCREEN_BUCKET = 250
+
+
+def vision_location_key(state, bucket_size=VISION_SCREEN_BUCKET):
+    """Stable key for "what the screen shows here": zone, act, camera-x bucket.
+
+    Proactive vision labels used to depend on cloud-call timing, which made the
+    `vision_context` a policy sees -- and therefore its fitness -- vary between
+    runs of the same policy. Caching labels by location makes re-runs see the
+    same context and avoids re-paying API calls for already-seen screens.
+    """
+    try:
+        zone = int(float(state.get("zone", 0)))
+        act = int(float(state.get("act", 0)))
+        screen_x = int(float(state.get("screen_x", state.get("x_pos", 0))))
+    except (TypeError, ValueError):
+        return None
+    bucket = max(1, int(bucket_size))
+    return f"zone-{zone}-act-{act}-sx-{(screen_x // bucket) * bucket}"
+
+
 def message_text(message):
     """Return a model message's text, falling back to ``reasoning_content``.
 
@@ -249,6 +270,44 @@ class MutatorClient:
 
         self.macro_client = OpenAI(api_key=self.macro_api_key, base_url=self.macro_base_url) if self.macro_api_key else None
         self.micro_client = OpenAI(api_key="not-needed", base_url=self.micro_base_url)
+
+        # Location-keyed cache of proactive vision labels (see
+        # vision_location_key). Loaded lazily; persisted as a plain JSON map.
+        self.vision_cache_path = os.environ.get(
+            "SONIC_VISION_CACHE", "artifacts/vision_cache.json"
+        )
+        self._vision_cache = None
+
+    def _load_vision_cache(self):
+        if self._vision_cache is None:
+            try:
+                with open(self.vision_cache_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                self._vision_cache = payload if isinstance(payload, dict) else {}
+            except (OSError, ValueError):
+                self._vision_cache = {}
+        return self._vision_cache
+
+    def cached_vision_context(self, location_key):
+        """Return the stored vision label for a location, or None."""
+        if not location_key:
+            return None
+        value = self._load_vision_cache().get(location_key)
+        return str(value) if value else None
+
+    def store_vision_context(self, location_key, label):
+        """Persist a successful vision label; UNKNOWN never poisons a location."""
+        if not location_key or not label or label == "UNKNOWN":
+            return
+        cache = self._load_vision_cache()
+        cache[location_key] = str(label)
+        try:
+            _atomic_write_text(
+                self.vision_cache_path,
+                json.dumps(cache, indent=2, sort_keys=True),
+            )
+        except OSError as e:
+            print(f"Failed to persist vision cache: {e}")
 
     def write_seed_policy(self, filepath):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)

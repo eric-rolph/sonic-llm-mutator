@@ -215,6 +215,62 @@ class EvaluatePolicyTests(unittest.TestCase):
         for path in env.context_shots:
             self.assertRegex(path, r"context_slot[012]\.png$")
 
+    def test_cached_vision_context_applies_synchronously_without_api_call(self):
+        class CachedVisionMutator:
+            def __init__(self):
+                self.analyze_calls = 0
+
+            def cached_vision_context(self, location_key):
+                return "SPIKES"
+
+            def analyze_environment(self, screenshot_path):
+                self.analyze_calls += 1
+                return "CLEAR"
+
+        states = [
+            {"x_pos": i, "y_pos": 100, "zone": 0, "act": 0, "screen_x": i, "rings": 0, "score": 0}
+            for i in range(400)
+        ]
+        env = FakeEnv(states)
+        mutator = CachedVisionMutator()
+
+        _, _, _, _, _, trace, _ = evaluate_policy(
+            env, StaticPolicy(), mutator, max_frames=350, verbose=False
+        )
+
+        # The cache answered every poll: no API/thread round trip, and the
+        # policy saw the cached label in its state by the next trace entry.
+        self.assertEqual(mutator.analyze_calls, 0)
+        self.assertEqual(trace[-1]["vision_context"], "SPIKES")
+
+    def test_vision_poll_stores_result_under_location_key(self):
+        class StoringVisionMutator:
+            def __init__(self):
+                self.stored = []
+
+            def cached_vision_context(self, location_key):
+                return None
+
+            def store_vision_context(self, location_key, label):
+                self.stored.append((location_key, label))
+
+            def analyze_environment(self, screenshot_path):
+                return "ENEMY"
+
+        states = [
+            {"x_pos": i, "y_pos": 100, "zone": 0, "act": 1, "screen_x": i, "rings": 0, "score": 0}
+            for i in range(400)
+        ]
+        env = FakeEnv(states)
+        mutator = StoringVisionMutator()
+
+        evaluate_policy(env, StaticPolicy(), mutator, max_frames=350, verbose=False)
+
+        self.assertGreaterEqual(len(mutator.stored), 1)
+        location_key, label = mutator.stored[0]
+        self.assertRegex(location_key, r"^zone-0-act-1-sx-\d+$")
+        self.assertEqual(label, "ENEMY")
+
     def test_proactive_vision_disabled_by_env_var(self):
         class CountingVisionMutator:
             def __init__(self):

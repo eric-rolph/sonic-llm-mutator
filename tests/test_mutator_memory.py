@@ -19,6 +19,7 @@ from llm.mutator import (
     normalize_lesson,
     normalize_vision_context,
     select_relevant_lessons,
+    vision_location_key,
 )
 
 
@@ -44,6 +45,48 @@ class ReasoningModelExtractionTests(unittest.TestCase):
         self.assertEqual(concise_vision_label("...spikes or enemies"), "SPIKES ENEMIES")
         self.assertEqual(concise_vision_label("The context is clear"), "CLEAR")
         self.assertEqual(concise_vision_label(""), "UNKNOWN")
+
+
+class VisionCacheTests(unittest.TestCase):
+    def make_client(self, cache_path):
+        client = object.__new__(MutatorClient)
+        client.vision_cache_path = cache_path
+        client._vision_cache = None
+        return client
+
+    def test_vision_location_key_buckets_camera_position(self):
+        state = {"zone": 0, "act": 1, "screen_x": 1337}
+        self.assertEqual(vision_location_key(state), "zone-0-act-1-sx-1250")
+        # Same bucket -> same key; next bucket -> different key.
+        self.assertEqual(
+            vision_location_key({"zone": 0, "act": 1, "screen_x": 1499}),
+            "zone-0-act-1-sx-1250",
+        )
+        self.assertNotEqual(
+            vision_location_key({"zone": 0, "act": 1, "screen_x": 1500}),
+            vision_location_key(state),
+        )
+        self.assertIsNone(vision_location_key({"zone": "??"}))
+
+    def test_store_and_lookup_round_trip_persists_across_instances(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = os.path.join(tmp, "vision_cache.json")
+            writer = self.make_client(cache_path)
+            writer.store_vision_context("zone-0-act-1-sx-1250", "SPIKES")
+
+            reader = self.make_client(cache_path)
+            self.assertEqual(reader.cached_vision_context("zone-0-act-1-sx-1250"), "SPIKES")
+            self.assertIsNone(reader.cached_vision_context("zone-0-act-1-sx-1500"))
+
+    def test_unknown_labels_never_poison_a_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = os.path.join(tmp, "vision_cache.json")
+            client = self.make_client(cache_path)
+            client.store_vision_context("key", "UNKNOWN")
+            client.store_vision_context("key", "")
+            client.store_vision_context(None, "SPIKES")
+            self.assertIsNone(client.cached_vision_context("key"))
+            self.assertFalse(os.path.exists(cache_path))
 
 
 class MutatorMemoryTests(unittest.TestCase):

@@ -22,7 +22,7 @@ from core.policy_runner import PolicyRunner, PolicyTimeout
 from core.policy_validator import validate_policy_source
 from core.population import PopulationArchive
 from core.trace_context import build_screenshot_montage, build_trace_entry
-from llm.mutator import MutatorClient
+from llm.mutator import MutatorClient, vision_location_key
 
 # Cadence for in-loop sampling, measured in emulator frames. Counter-based
 # checks below ensure these still fire when action_repeat does not evenly divide
@@ -160,6 +160,19 @@ def capture_screenshot(env, filepath=None):
         return env.get_screenshot()
     except TypeError:
         return env.get_screenshot()
+
+
+def poll_vision_label(mutator, screenshot_path, location_key):
+    """Run one proactive vision poll, storing the label in the mutator's cache.
+
+    The store hook is duck-typed so lightweight test/benchmark mutators that
+    only define ``analyze_environment`` keep working unchanged.
+    """
+    label = mutator.analyze_environment(screenshot_path)
+    store = getattr(mutator, "store_vision_context", None)
+    if store is not None and location_key:
+        store(location_key, label)
+    return label
 
 
 def clear_candidate_recording(record_dir, candidate_idx):
@@ -387,14 +400,28 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
                 # Kick off the next proactive vision poll in the background.
                 if frames_alive - last_vision_frame >= VISION_INTERVAL and vision_future is None:
                     last_vision_frame = frames_alive
-                    slot = vision_poll_count % CONTEXT_SCREENSHOT_SLOTS
-                    vision_poll_count += 1
-                    context_path = f"artifacts/failures/context_slot{slot}.png"
-                    shot = capture_screenshot(env, context_path)
-                    if shot:
-                        context_screenshots.append(shot)
-                        context_screenshots = context_screenshots[-CONTEXT_SCREENSHOT_SLOTS:]
-                        vision_future = vision_executor.submit(mutator.analyze_environment, shot)
+                    # A location whose label is already cached resolves
+                    # synchronously: same context every run, no API call.
+                    location_key = vision_location_key(state)
+                    cache_lookup = getattr(mutator, "cached_vision_context", None)
+                    cached_context = (
+                        cache_lookup(location_key)
+                        if cache_lookup is not None and location_key
+                        else None
+                    )
+                    if cached_context:
+                        current_vision_context = cached_context
+                    else:
+                        slot = vision_poll_count % CONTEXT_SCREENSHOT_SLOTS
+                        vision_poll_count += 1
+                        context_path = f"artifacts/failures/context_slot{slot}.png"
+                        shot = capture_screenshot(env, context_path)
+                        if shot:
+                            context_screenshots.append(shot)
+                            context_screenshots = context_screenshots[-CONTEXT_SCREENSHOT_SLOTS:]
+                            vision_future = vision_executor.submit(
+                                poll_vision_label, mutator, shot, location_key
+                            )
 
             policy_state = dict(state)
             policy_state["vision_context"] = current_vision_context
