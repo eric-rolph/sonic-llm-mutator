@@ -400,7 +400,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
 
                 existing_functions = _top_level_functions(existing_skills)
                 new_functions = _top_level_functions(new_skills_code)
-                
+
                 new_ast = ast.parse(new_skills_code)
                 added_funcs_code = []
                 for node in new_ast.body:
@@ -409,7 +409,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
                             source = ast.get_source_segment(new_skills_code, node)
                             if source:
                                 added_funcs_code.append(source)
-                
+
                 changed_functions = {
                     name
                     for name, definition in existing_functions.items()
@@ -420,18 +420,18 @@ Return ONLY valid Python code containing the updated skill library (the existing
                         "Note: Extracted skills tried to update existing functions (ignored): "
                         + ", ".join(sorted(changed_functions))
                     )
-                
+
                 if not added_funcs_code:
                     print("No new skills extracted.")
                     return
-                
+
                 combined_skills = existing_skills
                 if combined_skills and not combined_skills.endswith("\n"):
                     combined_skills += "\n"
                 if combined_skills:
                     combined_skills += "\n\n"
                 combined_skills += "\n\n".join(added_funcs_code) + "\n"
-                
+
                 validate_skills_source(combined_skills)
                 _atomic_write_text(skills_path, combined_skills)
                 importlib.invalidate_caches()

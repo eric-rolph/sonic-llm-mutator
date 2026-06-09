@@ -1,9 +1,32 @@
 param (
     [int]$Generations = 100,
-    [int]$Frames = 12000
+    [int]$Frames = 12000,
+    # Path to a Sonic the Hedgehog (Genesis) ROM used to seed the retro
+    # backend's data directory when no ROM has been imported yet. Override via
+    # parameter or the SONIC_ROM_SOURCE environment variable.
+    [string]$RomSource = $env:SONIC_ROM_SOURCE
 )
 
 Write-Host "Starting Sonic LLM Mutator Pipeline Simulation..." -ForegroundColor Cyan
+
+# 0. Load local configuration from .env if present (see .env.example).
+#    Accepts plain `KEY=value` and bash-style `export KEY='value'` lines;
+#    values already present in the environment are not overwritten.
+$envFile = Join-Path $PSScriptRoot ".env"
+if (Test-Path $envFile) {
+    Write-Host "Loading environment from .env..."
+    foreach ($line in Get-Content $envFile) {
+        $trimmed = $line.Trim()
+        if ($trimmed -eq "" -or $trimmed.StartsWith("#")) { continue }
+        if ($trimmed -match "^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$") {
+            $name = $Matches[1]
+            $value = $Matches[2].Trim().Trim("'").Trim('"')
+            if (-not (Test-Path "Env:$name")) {
+                Set-Item -Path "Env:$name" -Value $value
+            }
+        }
+    }
+}
 
 # 1. Activate Environment
 if (Test-Path ".\venv38\Scripts\Activate.ps1") {
@@ -26,13 +49,14 @@ $romPath = Join-Path $retroPath "data\stable\SonicTheHedgehog-Genesis\rom.md"
 
 if (-Not (Test-Path $romPath)) {
     Write-Host "Sonic ROM not found in retro backend data directory." -ForegroundColor Yellow
-    Write-Host "Attempting to copy from Downloads..."
-    $sourceRom = "C:\Users\ericr\Downloads\Sonic_The_Hedgehog_W_REV01_h3C.bin"
-    if (Test-Path $sourceRom) {
-        Copy-Item $sourceRom $romPath -Force
+    if ($RomSource -and (Test-Path $RomSource)) {
+        Write-Host "Copying ROM from $RomSource..."
+        Copy-Item $RomSource $romPath -Force
         Write-Host "ROM copied successfully." -ForegroundColor Green
     } else {
-        Write-Host "Source ROM not found at $sourceRom. Pipeline cannot continue." -ForegroundColor Red
+        Write-Host "No ROM source configured. Either import the ROM once with:" -ForegroundColor Red
+        Write-Host "    python -m retro.import /path/to/your/roms" -ForegroundColor Red
+        Write-Host "or pass -RomSource <path-to-rom> (or set SONIC_ROM_SOURCE)." -ForegroundColor Red
         exit 1
     }
 }
