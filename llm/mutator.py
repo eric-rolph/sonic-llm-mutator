@@ -6,11 +6,11 @@ import mimetypes
 import os
 import re
 import sys
-import tempfile
 
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from core.fsio import atomic_write_text
 from core.policy_validator import validate_skills_source
 from core.trace_context import trace_entry_x, trace_entry_zone_act
 from llm.prompts import SYSTEM_PROMPT
@@ -22,21 +22,6 @@ def _top_level_functions(source):
         for node in ast.parse(source or "").body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-
-
-def _atomic_write_text(filepath, text):
-    directory = os.path.dirname(filepath) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".skills-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, filepath)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
 
 
 def extract_json_object(text):
@@ -302,7 +287,7 @@ class MutatorClient:
         cache = self._load_vision_cache()
         cache[location_key] = str(label)
         try:
-            _atomic_write_text(
+            atomic_write_text(
                 self.vision_cache_path,
                 json.dumps(cache, indent=2, sort_keys=True),
             )
@@ -570,7 +555,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
                 combined_skills += "\n\n".join(added_funcs_code) + "\n"
 
                 validate_skills_source(combined_skills)
-                _atomic_write_text(skills_path, combined_skills)
+                atomic_write_text(skills_path, combined_skills)
                 importlib.invalidate_caches()
                 loaded_skills = sys.modules.get("policies.skills")
                 try:
@@ -580,7 +565,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
                         importlib.reload(loaded_skills)
                 except Exception:
                     if existing_skills:
-                        _atomic_write_text(skills_path, existing_skills)
+                        atomic_write_text(skills_path, existing_skills)
                     elif os.path.exists(skills_path):
                         os.remove(skills_path)
                     importlib.invalidate_caches()

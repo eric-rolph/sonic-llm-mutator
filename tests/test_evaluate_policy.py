@@ -374,7 +374,7 @@ class EvaluatePolicyTests(unittest.TestCase):
     def test_policy_runner_startup_failure_invalidates_candidate(self):
         env = FakeEnv([{"x_pos": 10, "y_pos": 100, "rings": 0, "score": 0}] * 3)
 
-        with mock.patch("main.PolicyRunner", side_effect=RuntimeError("spawn failed")):
+        with mock.patch("core.evaluation.PolicyRunner", side_effect=RuntimeError("spawn failed")):
             fitness, frames, max_x, reason, _, _, components = self.evaluate_silently(
                 env,
                 max_frames=3,
