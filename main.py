@@ -784,6 +784,7 @@ def derive_resume_state(history_entries):
             "all_time_champion_fitness": -1.0,
             "start_generation": 1,
             "stagnation_counter": 0,
+            "champion_max_frames": None,
         }
     def number(entry, key, default, converter):
         try:
@@ -794,15 +795,44 @@ def derive_resume_state(history_entries):
         except (OverflowError, TypeError, ValueError):
             return default
 
+    champion_entry = max(
+        history_entries, key=lambda entry: number(entry, "fitness", -1.0, float)
+    )
+
     return {
-        "all_time_champion_fitness": max(
-            number(entry, "fitness", -1.0, float) for entry in history_entries
-        ),
+        "all_time_champion_fitness": number(champion_entry, "fitness", -1.0, float),
         "start_generation": number(history_entries[-1], "generation", 0, int) + 1,
         "stagnation_counter": number(
             history_entries[-1], "stagnation_counter", 0, int
         ),
+        "champion_max_frames": number(champion_entry, "max_frames", None, int),
     }
+
+
+def resolve_working_fitness_floor(
+    baseline_fitness,
+    champion_fitness,
+    champion_max_frames,
+    current_max_frames,
+    verbose=True,
+):
+    """Pick the promotion bar for a (possibly resumed) run.
+
+    Fitness scales with the frame budget, so flooring the bar at a historical
+    champion measured under a *different* ``max_frames`` makes the bar
+    unreachable (smaller budget) or trivial (larger budget) and the loop
+    stagnates forever. Legacy histories without a recorded budget keep the old
+    flooring behaviour.
+    """
+    if champion_max_frames is not None and int(champion_max_frames) != int(current_max_frames):
+        if verbose and champion_fitness > baseline_fitness:
+            print(
+                f"Historical champion fitness {champion_fitness:.2f} was measured at "
+                f"max_frames={champion_max_frames}, but this run uses max_frames={current_max_frames}. "
+                f"Using the re-evaluated baseline {baseline_fitness:.2f} as the promotion bar."
+            )
+        return baseline_fitness
+    return max(baseline_fitness, champion_fitness)
 
 
 def candidate_is_promotable(env, policy, components):
@@ -875,8 +905,12 @@ def run_evaluation_loop(
     start_gen = resume_state["start_generation"]
     stagnation_counter = resume_state["stagnation_counter"]
     baseline_context = evaluate_working_baseline(env, working_path, mutator, max_frames, action_repeat=action_repeat)
-    working_fitness = baseline_context["working_fitness"]
-    working_fitness = max(working_fitness, all_time_champion_fitness)
+    working_fitness = resolve_working_fitness_floor(
+        baseline_context["working_fitness"],
+        all_time_champion_fitness,
+        resume_state["champion_max_frames"],
+        max_frames,
+    )
     working_frontier = {
         "failure_reason": baseline_context["last_failure_reason"],
         "trace": baseline_context["last_trace"],
@@ -1091,7 +1125,7 @@ def run_evaluation_loop(
                 atomic_write_text(champion_path, best_candidate_code)
 
             # Archive the winning candidate
-            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
+            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components, max_frames=max_frames)
         else:
             print(f"No candidate beat the working policy ({working_fitness:.2f}). Stagnation counter: {stagnation_counter + 1}")
             stagnation_counter += 1
@@ -1104,7 +1138,7 @@ def run_evaluation_loop(
                     print(f"Failed to extract lesson: {e}")
 
             # We log the generation even if it failed so the dashboard updates
-            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
+            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components, max_frames=max_frames)
 
 
 def main(argv=None):

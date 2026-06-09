@@ -14,6 +14,7 @@ from main import (
     preserve_frontier_screenshot,
     render_candidate_video,
     resolve_end_generation,
+    resolve_working_fitness_floor,
     seed_population_baseline,
     select_working_frontier_context,
 )
@@ -212,8 +213,57 @@ class RunResumeTests(unittest.TestCase):
                 "all_time_champion_fitness": -1.0,
                 "start_generation": 1,
                 "stagnation_counter": 0,
+                "champion_max_frames": None,
             },
         )
+
+    def test_resume_state_reports_champion_frame_budget(self):
+        state = derive_resume_state(
+            [
+                {"generation": 7, "fitness": 100.0, "max_frames": 12000},
+                {"generation": 8, "fitness": 90.0, "max_frames": 2000},
+            ]
+        )
+
+        self.assertEqual(state["all_time_champion_fitness"], 100.0)
+        self.assertEqual(state["champion_max_frames"], 12000)
+
+    def test_resume_state_handles_legacy_entries_without_frame_budget(self):
+        state = derive_resume_state([{"generation": 7, "fitness": 100.0}])
+
+        self.assertIsNone(state["champion_max_frames"])
+
+    def test_fitness_floor_applies_when_budgets_match(self):
+        bar = resolve_working_fitness_floor(
+            baseline_fitness=80.0,
+            champion_fitness=100.0,
+            champion_max_frames=12000,
+            current_max_frames=12000,
+            verbose=False,
+        )
+        self.assertEqual(bar, 100.0)
+
+    def test_fitness_floor_skipped_when_frame_budget_changed(self):
+        # Resuming with a smaller --frames must not leave the bar at a
+        # champion fitness no candidate can physically reach.
+        bar = resolve_working_fitness_floor(
+            baseline_fitness=80.0,
+            champion_fitness=100.0,
+            champion_max_frames=12000,
+            current_max_frames=2000,
+            verbose=False,
+        )
+        self.assertEqual(bar, 80.0)
+
+    def test_fitness_floor_keeps_legacy_behaviour_without_recorded_budget(self):
+        bar = resolve_working_fitness_floor(
+            baseline_fitness=80.0,
+            champion_fitness=100.0,
+            champion_max_frames=None,
+            current_max_frames=2000,
+            verbose=False,
+        )
+        self.assertEqual(bar, 100.0)
 
     def test_dry_run_candidate_cannot_be_promoted(self):
         self.assertFalse(candidate_is_promotable(None, object(), {}))

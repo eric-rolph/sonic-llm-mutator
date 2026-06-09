@@ -41,7 +41,7 @@ class EvolutionHistory:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    def log_generation(self, generation, policy_file, fitness, failure_reason, screenshot_path, llm_reasoning, stagnation_counter=0, components=None):
+    def log_generation(self, generation, policy_file, fitness, failure_reason, screenshot_path, llm_reasoning, stagnation_counter=0, components=None, max_frames=None):
         # Archive the policy file
         timestamp = int(time.time())
         archive_name = f"gen_{generation}_{timestamp}.py"
@@ -59,7 +59,11 @@ class EvolutionHistory:
             "failure_reason": failure_reason,
             "screenshot": screenshot_path,
             "archive_path": archive_path,
-            "llm_reasoning": llm_reasoning
+            "llm_reasoning": llm_reasoning,
+            # Frame budget the fitness was measured under. Fitness numbers are
+            # only comparable across runs that share a budget (see
+            # resolve_working_fitness_floor in main.py).
+            "max_frames": max_frames,
         }
         self.history.append(entry)
         self._save_history()
