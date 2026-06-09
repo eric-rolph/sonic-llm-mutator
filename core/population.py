@@ -62,12 +62,25 @@ def p_ucb_score(normalized_fitness, visits, total_visits, exploration_constant=0
     return float(normalized_fitness) + exploration_constant * math.sqrt(total_visits + 1) / (visits + 1)
 
 
+# The index is loaded and fully rewritten on every evaluation, so records in
+# it must stay small: long text is truncated and traces/components live in a
+# per-policy details sidecar (details/<policy_id>.json) instead.
+INDEX_TEXT_LIMIT = 300
+_HEAVY_FIELDS = ("trace", "components")
+
+
+def _truncate(text, limit=INDEX_TEXT_LIMIT):
+    text = str(text or "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 class PopulationArchive:
     """Persistent archive of every unique evaluated policy."""
 
     def __init__(self, root="artifacts/population"):
         self.root = Path(root)
         self.policy_dir = self.root / "policies"
+        self.details_dir = self.root / "details"
         self.index_path = self.root / "index.json"
 
     def load_records(self):
@@ -78,11 +91,55 @@ class PopulationArchive:
         candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
         return candidates if isinstance(candidates, list) else []
 
+    def load_details(self, policy_id):
+        """Full evaluation context (trace, components, untruncated text)."""
+        try:
+            payload = json.loads(
+                (self.details_dir / f"{policy_id}.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_details(self, policy_id, details):
+        self.details_dir.mkdir(parents=True, exist_ok=True)
+        details_path = self.details_dir / f"{policy_id}.json"
+        temp_path = details_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(details, indent=2), encoding="utf-8")
+        os.replace(str(temp_path), str(details_path))
+
+    def _slim_record(self, record):
+        """Strip heavy fields out of an index record, spilling them to details.
+
+        Also migrates legacy records that stored the full trace inline in
+        index.json the first time they are rewritten.
+        """
+        if not any(field in record for field in _HEAVY_FIELDS):
+            return record
+        policy_id = str(record.get("policy_id", ""))
+        if policy_id:
+            details = self.load_details(policy_id)
+            for field in _HEAVY_FIELDS:
+                if field in record:
+                    details[field] = record[field]
+            for field in ("failure_reason", "reasoning"):
+                if field in record:
+                    details.setdefault(field, record[field])
+            details["policy_id"] = policy_id
+            self._write_details(policy_id, details)
+        slim = {key: value for key, value in record.items() if key not in _HEAVY_FIELDS}
+        for field in ("failure_reason", "reasoning"):
+            if field in slim:
+                slim[field] = _truncate(slim[field])
+        return slim
+
     def _save_records(self, records):
         self.root.mkdir(parents=True, exist_ok=True)
+        slimmed = [self._slim_record(record) for record in records]
+        records[:] = slimmed
         temp_path = self.index_path.with_suffix(".json.tmp")
         temp_path.write_text(
-            json.dumps({"candidates": records}, indent=2),
+            json.dumps({"candidates": slimmed}, indent=2),
             encoding="utf-8",
         )
         os.replace(str(temp_path), str(self.index_path))
@@ -103,7 +160,9 @@ class PopulationArchive:
         records = self.load_records()
         record = next((item for item in records if item.get("code_hash") == code_hash), None)
 
+        improved = False
         if record is None:
+            improved = True
             self.policy_dir.mkdir(parents=True, exist_ok=True)
             code_path = self.policy_dir / f"{policy_id}.py"
             code_path.write_text(code, encoding="utf-8")
@@ -112,10 +171,8 @@ class PopulationArchive:
                 "code_hash": code_hash,
                 "code_path": f"policies/{policy_id}.py",
                 "fitness": float(fitness),
-                "components": components or {},
-                "failure_reason": str(failure_reason or ""),
-                "trace": trace or [],
-                "reasoning": str(reasoning or ""),
+                "failure_reason": _truncate(failure_reason),
+                "reasoning": _truncate(reasoning),
                 "behavior_descriptor": behavior_descriptor(code),
                 "obstacle_key": build_obstacle_key(failure_reason, trace or []),
                 "evaluations": 1,
@@ -128,16 +185,32 @@ class PopulationArchive:
             record["evaluations"] = int(record.get("evaluations", 0)) + 1
             record["updated_at"] = now
             if float(fitness) > float(record.get("fitness", float("-inf"))):
+                improved = True
                 record.update(
                     {
                         "fitness": float(fitness),
-                        "components": components or {},
-                        "failure_reason": str(failure_reason or ""),
-                        "trace": trace or [],
-                        "reasoning": str(reasoning or ""),
+                        "failure_reason": _truncate(failure_reason),
+                        "reasoning": _truncate(reasoning),
                         "obstacle_key": build_obstacle_key(failure_reason, trace or []),
                     }
                 )
+                record.pop("trace", None)
+                record.pop("components", None)
+
+        if improved:
+            # Details mirror the best observed evaluation, like the index.
+            self._write_details(
+                policy_id,
+                {
+                    "policy_id": policy_id,
+                    "fitness": float(fitness),
+                    "components": components or {},
+                    "failure_reason": str(failure_reason or ""),
+                    "trace": trace or [],
+                    "reasoning": str(reasoning or ""),
+                    "updated_at": now,
+                },
+            )
 
         self._save_records(records)
         return record
