@@ -60,6 +60,33 @@ class EmulatorSmokeTests(unittest.TestCase):
         finally:
             env.close()
 
+    def test_savestate_round_trip_restores_emulator_state(self):
+        # Savestates are the foundation of agentic failure diagnosis: capture,
+        # diverge for 30 frames, restore, and the authoritative variables must
+        # match the captured moment. Also proves stepping works after a load.
+        from emulator.sonic_env import SonicEnvWrapper
+
+        env = SonicEnvWrapper(game="Airstriker-Genesis", state="Level1", record_path=None)
+        try:
+            action = action_string_to_array("B")
+            for _ in range(5):
+                env.step(action)
+            saved = env.save_emulator_state()
+            state_at_save = env.get_state()
+
+            for _ in range(30):
+                env.step(action_string_to_array("RIGHT"))
+
+            env.load_emulator_state(saved)
+            restored = env.get_state()
+            for key in ("x_pos", "y_pos", "rings", "lives", "score"):
+                self.assertEqual(state_at_save[key], restored[key], key)
+
+            obs, reward, done, info = env.step(action)
+            self.assertIsNotNone(obs)
+        finally:
+            env.close()
+
 
 if __name__ == "__main__":
     unittest.main()

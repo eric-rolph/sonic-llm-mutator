@@ -25,10 +25,10 @@
 - Modify: `tests/test_sonic_env_backends.py`
 - Modify: `tests/test_emulator_smoke.py`
 
-- [ ] Add `save_emulator_state()` / `load_emulator_state(state_bytes)` to `SonicEnvWrapper` (via `unwrapped.em`; refresh obs from `em.get_screen()`, info from `data.lookup_all()`, re-baseline velocity).
-- [ ] Stubbed tests: round-trip through a fake `em`, obs/info refreshed, velocity re-baselined, missing `em` raises a clear error.
-- [ ] Extend the real-backend smoke test with a savestate round-trip (capture → step 30 → restore → state matches) so CI proves the API on stable-retro and local runs prove gym-retro.
-- [ ] Run `.\venv38\Scripts\python.exe -m unittest tests.test_sonic_env_backends tests.test_emulator_smoke -v`.
+- [x] Add `save_emulator_state()` / `load_emulator_state(state_bytes)` to `SonicEnvWrapper` (via `unwrapped.em`; refresh obs from `em.get_screen()`, info from `data.lookup_all()`, re-baseline velocity).
+- [x] Stubbed tests: round-trip through a fake `em`, obs/info refreshed, velocity re-baselined, missing `em` raises a clear error.
+- [x] Extend the real-backend smoke test with a savestate round-trip (capture → step 30 → restore → state matches) so CI proves the API on stable-retro and local runs prove gym-retro.
+- [x] Run `.\venv38\Scripts\python.exe -m unittest tests.test_sonic_env_backends tests.test_emulator_smoke -v`.
 
 ### Task 2: Snapshot ring + persisted failure window
 

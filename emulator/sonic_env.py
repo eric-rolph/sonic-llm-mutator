@@ -101,6 +101,35 @@ class SonicEnvWrapper:
             del self.last_y
         return self.obs
 
+    def _emulator(self):
+        """The raw retro emulator handle, common to gym-retro and stable-retro."""
+        unwrapped = getattr(self.env, "unwrapped", self.env)
+        emulator = getattr(unwrapped, "em", None)
+        if emulator is None:
+            raise RuntimeError("This emulator backend does not expose savestates (no .em handle).")
+        return emulator
+
+    def save_emulator_state(self):
+        """Return a raw savestate of the whole machine (not just tracked RAM)."""
+        return self._emulator().get_state()
+
+    def load_emulator_state(self, state_bytes):
+        """Restore a savestate and refresh obs/info without advancing a frame.
+
+        Velocity tracking re-baselines to the restored position so the first
+        ``get_state`` after a load reports zero velocity instead of the delta
+        from wherever the emulator happened to be before the seek.
+        """
+        emulator = self._emulator()
+        emulator.set_state(state_bytes)
+        self.obs = emulator.get_screen()
+        unwrapped = getattr(self.env, "unwrapped", self.env)
+        data = getattr(unwrapped, "data", None)
+        self.info = dict(data.lookup_all()) if data is not None else {}
+        self.last_x = self.info.get('x', 0)
+        self.last_y = self.info.get('y', 0)
+        return self.obs
+
     def get_screenshot(self, filepath="artifacts/failures/latest_screenshot.png"):
         """Saves current observation as an image."""
         # Convert RGB (from retro) to BGR (for OpenCV)
