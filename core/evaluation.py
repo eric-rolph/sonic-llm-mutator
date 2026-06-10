@@ -58,7 +58,7 @@ def poll_vision_label(mutator, screenshot_path, location_key):
     return label
 
 
-def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_repeat=1):
+def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_repeat=1, snapshot_sink=None):
     obs = env.reset()
     frames_alive = 0
     max_x = 0
@@ -186,6 +186,10 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
     try:
         state = env.get_state()
         zone_act = update_authoritative_progress(state, 0)
+        # Savestate ring for agentic failure diagnosis; cadence and error
+        # handling live inside the sink, so this is a cheap no-op most frames.
+        if snapshot_sink is not None:
+            snapshot_sink.record(env, frames_alive, state)
         while not done and frames_alive < max_frames:
             if proactive_vision:
                 # Pick up the most recent finished vision result without blocking.
@@ -271,6 +275,8 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
 
             state = env.get_state()
             zone_act = update_authoritative_progress(state, frames_alive - frames_before_action)
+            if snapshot_sink is not None:
+                snapshot_sink.record(env, frames_alive, state)
 
             if stuck_counter > STUCK_FRAME_LIMIT:
                 if verbose:

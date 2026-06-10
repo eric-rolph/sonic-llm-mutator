@@ -215,6 +215,33 @@ class EvaluatePolicyTests(unittest.TestCase):
         for path in env.context_shots:
             self.assertRegex(path, r"context_slot[012]\.png$")
 
+    def test_snapshot_sink_receives_every_authoritative_state(self):
+        class RecordingSink:
+            def __init__(self):
+                self.calls = []
+
+            def record(self, env, frame, state):
+                self.calls.append((frame, dict(state)))
+
+        states = [
+            {"x_pos": i * 10, "y_pos": 100, "rings": 0, "score": 0}
+            for i in range(20)
+        ]
+        env = FakeEnv(states)
+        sink = RecordingSink()
+
+        evaluate_policy(
+            env, StaticPolicy(), NoVisionMutator(), max_frames=10, verbose=False, snapshot_sink=sink
+        )
+
+        # Initial state plus one per stepped frame, frames monotonic; cadence
+        # is the sink's own concern (FailureSnapshotRing tests cover it).
+        self.assertEqual(len(sink.calls), 11)
+        frames = [frame for frame, _ in sink.calls]
+        self.assertEqual(frames, sorted(frames))
+        self.assertEqual(sink.calls[0][0], 0)
+        self.assertEqual(sink.calls[-1][0], 10)
+
     def test_cached_vision_context_applies_synchronously_without_api_call(self):
         class CachedVisionMutator:
             def __init__(self):

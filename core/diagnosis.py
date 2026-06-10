@@ -43,17 +43,21 @@ class FailureSnapshotRing:
         self.interval = max(1, int(interval))
         self.capacity = max(1, int(capacity))
         self.snapshots = []
+        self.last_seen = None  # (frame, info) of the newest state offered
         self._last_frame = None
         self.disabled = False
 
     def record(self, env, frame, state):
         """Capture a savestate at the cadence. Never raises into evaluation.
 
-        A backend without savestate support disables the ring on first failure
-        instead of paying a try/except per capture forever.
+        Every offered state updates ``last_seen`` (the eventual failure
+        moment); savestates are only captured at the cadence. A backend
+        without savestate support disables the ring on first failure instead
+        of paying a try/except per capture forever.
         """
         if self.disabled:
             return False
+        self.last_seen = (int(frame), _info_subset(state))
         if self._last_frame is not None and frame - self._last_frame < self.interval:
             return False
         try:
@@ -76,6 +80,10 @@ class FailureSnapshotRing:
         """Write blobs + manifest, replacing any previous window. None if empty."""
         if not self.snapshots:
             return None
+        if final_state is None and self.last_seen is not None:
+            final_state = self.last_seen[1]
+        if failure_frame is None and self.last_seen is not None:
+            failure_frame = self.last_seen[0]
         os.makedirs(directory, exist_ok=True)
         for name in os.listdir(directory):
             if name.endswith(".state") or name == "window.json":

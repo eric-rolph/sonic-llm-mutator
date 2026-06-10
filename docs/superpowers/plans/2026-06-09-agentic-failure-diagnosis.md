@@ -60,10 +60,10 @@
 - Modify: `tests/test_evaluate_policy.py`
 - Modify: `tests/test_run_resume.py`
 
-- [ ] `evaluate_policy(..., snapshot_sink=None)`: cadence-record into the sink inside the loop (no behavior change when `None`).
-- [ ] Baseline and candidate evaluations in `main.py` each use a fresh ring; when a run becomes the working frontier (baseline or promotion), persist its ring and carry the window directory in the frontier context.
-- [ ] Tests: sink receives cadenced snapshots; frontier carries the window dir on promotion and baseline.
-- [ ] Run `.\venv38\Scripts\python.exe -m unittest tests.test_evaluate_policy tests.test_run_resume -v`.
+- [x] `evaluate_policy(..., snapshot_sink=None)`: cadence-record into the sink inside the loop (no behavior change when `None`).
+- [x] Baseline and candidate evaluations in `main.py` each use a fresh ring; when a run becomes the working frontier (baseline or promotion), persist its ring and carry the window directory in the frontier context.
+- [x] Tests: sink receives cadenced snapshots; frontier carries the window dir on promotion and baseline.
+- [x] Run `.\venv38\Scripts\python.exe -m unittest tests.test_evaluate_policy tests.test_run_resume -v`.
 
 ### Task 5: Tool-calling diagnosis loop in the mutator
 
