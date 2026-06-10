@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -8,14 +9,17 @@ from io import StringIO
 from unittest.mock import patch
 
 from llm.mutator import (
+    MAX_SEMANTIC_LESSONS,
     MutatorClient,
     concise_vision_label,
     dedupe_lessons,
     extract_json_object,
+    hazard_category,
     message_text,
     normalize_lesson,
     normalize_vision_context,
     select_relevant_lessons,
+    vision_location_key,
 )
 
 
@@ -41,6 +45,48 @@ class ReasoningModelExtractionTests(unittest.TestCase):
         self.assertEqual(concise_vision_label("...spikes or enemies"), "SPIKES ENEMIES")
         self.assertEqual(concise_vision_label("The context is clear"), "CLEAR")
         self.assertEqual(concise_vision_label(""), "UNKNOWN")
+
+
+class VisionCacheTests(unittest.TestCase):
+    def make_client(self, cache_path):
+        client = object.__new__(MutatorClient)
+        client.vision_cache_path = cache_path
+        client._vision_cache = None
+        return client
+
+    def test_vision_location_key_buckets_camera_position(self):
+        state = {"zone": 0, "act": 1, "screen_x": 1337}
+        self.assertEqual(vision_location_key(state), "zone-0-act-1-sx-1250")
+        # Same bucket -> same key; next bucket -> different key.
+        self.assertEqual(
+            vision_location_key({"zone": 0, "act": 1, "screen_x": 1499}),
+            "zone-0-act-1-sx-1250",
+        )
+        self.assertNotEqual(
+            vision_location_key({"zone": 0, "act": 1, "screen_x": 1500}),
+            vision_location_key(state),
+        )
+        self.assertIsNone(vision_location_key({"zone": "??"}))
+
+    def test_store_and_lookup_round_trip_persists_across_instances(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = os.path.join(tmp, "vision_cache.json")
+            writer = self.make_client(cache_path)
+            writer.store_vision_context("zone-0-act-1-sx-1250", "SPIKES")
+
+            reader = self.make_client(cache_path)
+            self.assertEqual(reader.cached_vision_context("zone-0-act-1-sx-1250"), "SPIKES")
+            self.assertIsNone(reader.cached_vision_context("zone-0-act-1-sx-1500"))
+
+    def test_unknown_labels_never_poison_a_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = os.path.join(tmp, "vision_cache.json")
+            client = self.make_client(cache_path)
+            client.store_vision_context("key", "UNKNOWN")
+            client.store_vision_context("key", "")
+            client.store_vision_context(None, "SPIKES")
+            self.assertIsNone(client.cached_vision_context("key"))
+            self.assertFalse(os.path.exists(cache_path))
 
 
 class MutatorMemoryTests(unittest.TestCase):
@@ -87,6 +133,108 @@ class MutatorMemoryTests(unittest.TestCase):
         relevant = select_relevant_lessons(lessons, current_x=150, radius=1000, limit=1)
 
         self.assertEqual(relevant, ["- Jump at 200"])
+
+    def test_hazard_category_collapses_freeform_names(self):
+        self.assertEqual(hazard_category("Wall/Ledge"), "wall")
+        self.assertEqual(hazard_category("Vertical stuck loop"), "wall")
+        self.assertEqual(hazard_category("Pitfall"), "pit")
+        self.assertEqual(hazard_category("Spikes"), "spikes")
+        # Falls back to the lesson text when the hazard name is unhelpful.
+        self.assertEqual(hazard_category("Unknown", "jump to avoid the pit"), "pit")
+        self.assertEqual(hazard_category("Unknown", "no keywords here"), "other")
+
+    def test_dedupe_lessons_collapses_paraphrased_lessons_about_same_obstacle(self):
+        # Paraphrases of the same wall at the same spot must not accumulate.
+        lessons = [
+            {"x": 3061, "hazard": "Wall/Obstacle", "lesson": "Stop spamming RIGHT,B and try a pure jump."},
+            {"x": 3060, "hazard": "Wall/Ledge", "lesson": "Increase jump frequency to overcome the wall."},
+            {"x": 3062, "hazard": "Vertical stuck loop", "lesson": "Vary the input sequence at the wall."},
+        ]
+
+        deduped = dedupe_lessons(lessons, x_tolerance=25)
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["x"], 3061)
+
+    def test_dedupe_lessons_keeps_same_x_in_different_acts(self):
+        lessons = [
+            {"x": 3061, "zone": 0, "act": 0, "hazard": "Wall", "lesson": "Jump the Act 1 wall."},
+            {"x": 3061, "zone": 0, "act": 1, "hazard": "Wall", "lesson": "Jump the Act 2 wall."},
+            {"x": 3061, "hazard": "Wall", "lesson": "Legacy untagged wall lesson."},
+        ]
+
+        deduped = dedupe_lessons(lessons, x_tolerance=25)
+
+        self.assertEqual(len(deduped), 3)
+
+    def test_normalize_lesson_keeps_zone_and_act_when_parseable(self):
+        self.assertEqual(
+            normalize_lesson({"x": "287", "zone": "0", "act": 1.0, "hazard": "Pit", "lesson": "Jump"}),
+            {"x": 287, "zone": 0, "act": 1, "hazard": "Pit", "lesson": "Jump"},
+        )
+        self.assertEqual(
+            normalize_lesson({"x": 287, "zone": "??", "hazard": "Pit", "lesson": "Jump"}),
+            {"x": 287, "hazard": "Pit", "lesson": "Jump"},
+        )
+
+    def test_select_relevant_lessons_scopes_tagged_lessons_to_their_act(self):
+        lessons = [
+            {"x": 1000, "zone": 0, "act": 0, "hazard": "Pit", "lesson": "Act 1 pit"},
+            {"x": 1000, "zone": 0, "act": 1, "hazard": "Spikes", "lesson": "Act 2 spikes"},
+            {"x": 1000, "hazard": "Wall", "lesson": "Legacy lesson applies anywhere"},
+        ]
+
+        relevant = select_relevant_lessons(lessons, current_x=1000, zone=0, act=1)
+
+        self.assertEqual(
+            relevant,
+            ["- [zone 0 act 1] Act 2 spikes", "- Legacy lesson applies anywhere"],
+        )
+
+    def test_select_relevant_lessons_without_act_keeps_legacy_behaviour(self):
+        lessons = [
+            {"x": 1000, "zone": 0, "act": 0, "hazard": "Pit", "lesson": "Act 1 pit"},
+            {"x": 1000, "hazard": "Wall", "lesson": "Legacy lesson"},
+        ]
+
+        relevant = select_relevant_lessons(lessons, current_x=1000)
+
+        self.assertEqual(len(relevant), 2)
+
+    def test_extract_lesson_stamps_zone_act_from_trace_and_caps_bank(self):
+        class LessonMutator(MutatorClient):
+            def __init__(self):
+                pass
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                return '{"x": 4242, "hazard": "Pit", "lesson": "Jump at 4242"}', "local"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                os.makedirs("memory")
+                prefill = [
+                    {"x": i * 1000, "hazard": f"Hazard {i}", "lesson": f"Unique lesson {i}"}
+                    for i in range(MAX_SEMANTIC_LESSONS + 10)
+                ]
+                with open("memory/semantic_bank.json", "w", encoding="utf-8") as f:
+                    json.dump(prefill, f)
+
+                trace = [{"frame": 30, "x": 4200, "zone": 2, "act": 1}]
+                with redirect_stdout(StringIO()):
+                    LessonMutator().extract_lesson("Sonic got stuck", trace)
+
+                with open("memory/semantic_bank.json", "r", encoding="utf-8") as f:
+                    bank = json.load(f)
+
+                self.assertLessEqual(len(bank), MAX_SEMANTIC_LESSONS)
+                newest = bank[-1]
+                self.assertEqual(newest["x"], 4242)
+                self.assertEqual(newest["zone"], 2)
+                self.assertEqual(newest["act"], 1)
+            finally:
+                os.chdir(previous_cwd)
 
     def test_normalize_vision_context_handles_empty_model_content(self):
         self.assertEqual(normalize_vision_context(None), "UNKNOWN")

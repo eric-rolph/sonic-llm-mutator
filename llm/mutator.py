@@ -6,13 +6,13 @@ import mimetypes
 import os
 import re
 import sys
-import tempfile
 
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from core.fsio import atomic_write_text
 from core.policy_validator import validate_skills_source
-from core.trace_context import trace_entry_x
+from core.trace_context import trace_entry_x, trace_entry_zone_act
 from llm.prompts import SYSTEM_PROMPT
 
 
@@ -22,21 +22,6 @@ def _top_level_functions(source):
         for node in ast.parse(source or "").body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-
-
-def _atomic_write_text(filepath, text):
-    directory = os.path.dirname(filepath) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".skills-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, filepath)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
 
 
 def extract_json_object(text):
@@ -68,8 +53,44 @@ def extract_json_object(text):
     return None
 
 
+# Hard cap on stored lessons; oldest entries are dropped beyond this.
+MAX_SEMANTIC_LESSONS = 100
+
+# Ordered keyword buckets for collapsing the LLM's freeform hazard names
+# ("Wall/Ledge", "Vertical stuck loop", "Pitfall", ...) into a small category
+# set so paraphrased lessons about the same obstacle deduplicate.
+_HAZARD_CATEGORIES = (
+    ("pit", ("pit", "fall", "hole", "gap", "chasm")),
+    ("spikes", ("spike",)),
+    ("enemy", ("enemy", "badnik", "robot", "crab", "buzz", "chopper", "motobug")),
+    ("water", ("water", "drown")),
+    (
+        "wall",
+        (
+            "wall", "ledge", "obstacle", "stuck", "stall", "stagnation",
+            "geometry", "slope", "dip", "loop", "bounce", "deadlock",
+            "collision", "barrier", "vertical",
+        ),
+    ),
+)
+
+
+def hazard_category(hazard, lesson_text=""):
+    """Map a freeform hazard description to a coarse category name."""
+    for blob in (str(hazard or "").lower(), str(lesson_text or "").lower()):
+        for category, needles in _HAZARD_CATEGORIES:
+            if any(needle in blob for needle in needles):
+                return category
+    return "other"
+
+
 def normalize_lesson(entry):
-    """Return a compact semantic lesson dict, or None for malformed entries."""
+    """Return a compact semantic lesson dict, or None for malformed entries.
+
+    ``zone``/``act`` are kept when parseable so lessons can be scoped to the
+    act their x coordinate belongs to (x resets to ~0 every act). Lessons
+    without them are legacy entries treated as applying anywhere.
+    """
     if not isinstance(entry, dict):
         return None
     try:
@@ -82,28 +103,45 @@ def normalize_lesson(entry):
         return None
 
     hazard = str(entry.get("hazard", "Unknown")).strip() or "Unknown"
-    return {"x": x, "hazard": hazard, "lesson": lesson}
+    normalized = {"x": x, "hazard": hazard, "lesson": lesson}
+    for key in ("zone", "act"):
+        try:
+            normalized[key] = int(float(entry[key]))
+        except (KeyError, TypeError, ValueError):
+            pass
+    return normalized
+
+
+def lesson_semantic_key(lesson, x_bucket_size=25):
+    """Cluster key: same zone/act, same x bucket, same hazard category."""
+    bucket = max(1, int(x_bucket_size))
+    return (
+        lesson.get("zone"),
+        lesson.get("act"),
+        int(lesson["x"]) // bucket,
+        hazard_category(lesson.get("hazard", ""), lesson.get("lesson", "")),
+    )
 
 
 def dedupe_lessons(lessons, x_tolerance=25):
-    """Collapse malformed and duplicate nearby lessons while preserving order."""
+    """Collapse malformed entries and semantically duplicate lessons.
+
+    Earlier dedupe only collapsed *case-identical* text, so every paraphrase of
+    "you are stuck at x=3061, jump" accumulated and crowded the prompt's lesson
+    budget. Lessons now deduplicate by (zone, act, x bucket, hazard category);
+    the first occurrence wins and order is preserved.
+    """
     deduped = []
+    seen = set()
     for lesson in lessons:
         normalized = normalize_lesson(lesson)
         if normalized is None:
             continue
-
-        lesson_key = normalized["lesson"].casefold()
-        duplicate = False
-        for existing in deduped:
-            if (
-                abs(existing["x"] - normalized["x"]) <= x_tolerance
-                and existing["lesson"].casefold() == lesson_key
-            ):
-                duplicate = True
-                break
-        if not duplicate:
-            deduped.append(normalized)
+        key = lesson_semantic_key(normalized, x_tolerance)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
     return deduped
 
 
@@ -120,10 +158,26 @@ def load_semantic_bank(path="memory/semantic_bank.json"):
     return dedupe_lessons(raw_bank)
 
 
-def select_relevant_lessons(lessons, current_x, radius=1000, limit=10):
+def select_relevant_lessons(lessons, current_x, radius=1000, limit=10, zone=None, act=None):
+    """Pick lessons near ``current_x`` that apply to the current zone/act.
+
+    x coordinates are only meaningful within one act, so lessons tagged with a
+    zone/act are excluded outside it. Legacy untagged lessons (and callers that
+    do not know the current act) keep the old anywhere-matching behaviour.
+    """
     relevant = []
     for lesson in dedupe_lessons(lessons):
-        if abs(lesson["x"] - current_x) <= radius:
+        if abs(lesson["x"] - current_x) > radius:
+            continue
+        lesson_zone = lesson.get("zone")
+        lesson_act = lesson.get("act")
+        if zone is not None and lesson_zone is not None and lesson_zone != zone:
+            continue
+        if act is not None and lesson_act is not None and lesson_act != act:
+            continue
+        if lesson_zone is not None and lesson_act is not None:
+            relevant.append(f"- [zone {lesson_zone} act {lesson_act}] {lesson['lesson']}")
+        else:
             relevant.append(f"- {lesson['lesson']}")
     return relevant[-limit:]
 
@@ -133,6 +187,27 @@ def normalize_vision_context(content):
         return "UNKNOWN"
     normalized = str(content).strip().upper()
     return normalized or "UNKNOWN"
+
+
+VISION_SCREEN_BUCKET = 250
+
+
+def vision_location_key(state, bucket_size=VISION_SCREEN_BUCKET):
+    """Stable key for "what the screen shows here": zone, act, camera-x bucket.
+
+    Proactive vision labels used to depend on cloud-call timing, which made the
+    `vision_context` a policy sees -- and therefore its fitness -- vary between
+    runs of the same policy. Caching labels by location makes re-runs see the
+    same context and avoids re-paying API calls for already-seen screens.
+    """
+    try:
+        zone = int(float(state.get("zone", 0)))
+        act = int(float(state.get("act", 0)))
+        screen_x = int(float(state.get("screen_x", state.get("x_pos", 0))))
+    except (TypeError, ValueError):
+        return None
+    bucket = max(1, int(bucket_size))
+    return f"zone-{zone}-act-{act}-sx-{(screen_x // bucket) * bucket}"
 
 
 def message_text(message):
@@ -180,6 +255,44 @@ class MutatorClient:
 
         self.macro_client = OpenAI(api_key=self.macro_api_key, base_url=self.macro_base_url) if self.macro_api_key else None
         self.micro_client = OpenAI(api_key="not-needed", base_url=self.micro_base_url)
+
+        # Location-keyed cache of proactive vision labels (see
+        # vision_location_key). Loaded lazily; persisted as a plain JSON map.
+        self.vision_cache_path = os.environ.get(
+            "SONIC_VISION_CACHE", "artifacts/vision_cache.json"
+        )
+        self._vision_cache = None
+
+    def _load_vision_cache(self):
+        if self._vision_cache is None:
+            try:
+                with open(self.vision_cache_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                self._vision_cache = payload if isinstance(payload, dict) else {}
+            except (OSError, ValueError):
+                self._vision_cache = {}
+        return self._vision_cache
+
+    def cached_vision_context(self, location_key):
+        """Return the stored vision label for a location, or None."""
+        if not location_key:
+            return None
+        value = self._load_vision_cache().get(location_key)
+        return str(value) if value else None
+
+    def store_vision_context(self, location_key, label):
+        """Persist a successful vision label; UNKNOWN never poisons a location."""
+        if not location_key or not label or label == "UNKNOWN":
+            return
+        cache = self._load_vision_cache()
+        cache[location_key] = str(label)
+        try:
+            atomic_write_text(
+                self.vision_cache_path,
+                json.dumps(cache, indent=2, sort_keys=True),
+            )
+        except OSError as e:
+            print(f"Failed to persist vision cache: {e}")
 
     def write_seed_policy(self, filepath):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -317,11 +430,20 @@ Return ONLY a valid JSON object in this exact format:
             print("Failed to parse semantic lesson JSON.")
             return
 
+        # Stamp zone/act from the trace (authoritative emulator state) rather
+        # than trusting the model: x coordinates only mean anything per-act.
+        if coordinate_trace:
+            zone, act = trace_entry_zone_act(coordinate_trace[-1])
+            if zone is not None:
+                lesson_data["zone"] = zone
+            if act is not None:
+                lesson_data["act"] = act
+
         os.makedirs("memory", exist_ok=True)
         bank_path = "memory/semantic_bank.json"
         bank = load_semantic_bank(bank_path)
         bank.append(lesson_data)
-        bank = dedupe_lessons(bank)
+        bank = dedupe_lessons(bank)[-MAX_SEMANTIC_LESSONS:]
         with open(bank_path, "w", encoding="utf-8") as f:
             json.dump(bank, f, indent=4)
         print(f"Extracted and saved semantic lesson: {lesson_data.get('lesson')}")
@@ -400,7 +522,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
 
                 existing_functions = _top_level_functions(existing_skills)
                 new_functions = _top_level_functions(new_skills_code)
-                
+
                 new_ast = ast.parse(new_skills_code)
                 added_funcs_code = []
                 for node in new_ast.body:
@@ -409,7 +531,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
                             source = ast.get_source_segment(new_skills_code, node)
                             if source:
                                 added_funcs_code.append(source)
-                
+
                 changed_functions = {
                     name
                     for name, definition in existing_functions.items()
@@ -420,20 +542,20 @@ Return ONLY valid Python code containing the updated skill library (the existing
                         "Note: Extracted skills tried to update existing functions (ignored): "
                         + ", ".join(sorted(changed_functions))
                     )
-                
+
                 if not added_funcs_code:
                     print("No new skills extracted.")
                     return
-                
+
                 combined_skills = existing_skills
                 if combined_skills and not combined_skills.endswith("\n"):
                     combined_skills += "\n"
                 if combined_skills:
                     combined_skills += "\n\n"
                 combined_skills += "\n\n".join(added_funcs_code) + "\n"
-                
+
                 validate_skills_source(combined_skills)
-                _atomic_write_text(skills_path, combined_skills)
+                atomic_write_text(skills_path, combined_skills)
                 importlib.invalidate_caches()
                 loaded_skills = sys.modules.get("policies.skills")
                 try:
@@ -443,7 +565,7 @@ Return ONLY valid Python code containing the updated skill library (the existing
                         importlib.reload(loaded_skills)
                 except Exception:
                     if existing_skills:
-                        _atomic_write_text(skills_path, existing_skills)
+                        atomic_write_text(skills_path, existing_skills)
                     elif os.path.exists(skills_path):
                         os.remove(skills_path)
                     importlib.invalidate_caches()
@@ -458,16 +580,25 @@ Return ONLY valid Python code containing the updated skill library (the existing
         history_text = json.dumps(recent_history, indent=2)
         trace_text = ""
         current_x = 0
+        current_zone, current_act = None, None
         if coordinate_trace:
             trace_text = f"Recent frame trace leading to failure: {coordinate_trace}"
             if len(coordinate_trace) > 0:
                 current_x = trace_entry_x(coordinate_trace[-1])
+                current_zone, current_act = trace_entry_zone_act(coordinate_trace[-1])
 
         lessons_text = ""
         if os.path.exists("memory/semantic_bank.json"):
             try:
                 bank = load_semantic_bank("memory/semantic_bank.json")
-                relevant_lessons = select_relevant_lessons(bank, current_x, radius=1000, limit=10)
+                relevant_lessons = select_relevant_lessons(
+                    bank,
+                    current_x,
+                    radius=1000,
+                    limit=10,
+                    zone=current_zone,
+                    act=current_act,
+                )
                 if relevant_lessons:
                     lessons_text = "Relevant Semantic Memory (CRITICAL - DO NOT VIOLATE):\n" + "\n".join(relevant_lessons)
             except Exception as e:

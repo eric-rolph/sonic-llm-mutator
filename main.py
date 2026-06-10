@@ -1,60 +1,35 @@
+"""Evolutionary pipeline orchestration: generations, promotion, archiving.
+
+The separable pieces live in ``core``: the emulator episode loop in
+``core.evaluation``, the FunSearch parent pool in ``core.pool``, and the
+deterministic frontier guards in ``core.frontier``. This module wires them to
+the LLM mutator and the persistent history/population archives.
+"""
+
 import argparse
-import ast
 import concurrent.futures
 import glob
-import hashlib
 import math
 import os
 import random
-import re
 import shutil
 import subprocess
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.abspath("."))
 
-from core.actions import action_string_to_array
-from core.evaluator import calculate_fitness
+from core.evaluation import build_policy_load_failure, evaluate_policy
+from core.frontier import (
+    build_frontier_guard_candidate,
+    frontier_guard_marker,
+    recently_attempted_frontier_guard,
+)
+from core.fsio import atomic_write_text
 from core.history import EvolutionHistory
 from core.policy_loader import load_policy
-from core.policy_runner import PolicyRunner, PolicyTimeout
-from core.policy_validator import validate_policy_source
+from core.pool import load_pool_codes, update_pool
 from core.population import PopulationArchive
-from core.trace_context import build_screenshot_montage, build_trace_entry
 from llm.mutator import MutatorClient
-
-# Cadence for in-loop sampling, measured in emulator frames. Counter-based
-# checks below ensure these still fire when action_repeat does not evenly divide
-# the interval (a plain `frames % N == 0` test would silently skip).
-VISION_INTERVAL = 300   # proactive cloud-vision tagging (~5s at 60fps)
-TRACE_INTERVAL = 30     # rich trace entries (~0.5s at 60fps)
-CONTEXT_SCREENSHOT_SLOTS = 3  # bound on-disk context shots to a small ring
-# After an act transition the emulator keeps reporting the previous act's x for
-# a few frames before it resets to the new act's start. Re-baseline max_x to the
-# live x (and suspend stuck-detection) for this many frames so the stale value
-# is not treated as current-act progress.
-LEVEL_SETTLE_FRAMES = 150
-# Terminate a run once Sonic makes no forward progress for this many frames
-# (~8s at 60fps). Counted in frames (not loop iterations) so the threshold is
-# unaffected by action_repeat.
-STUCK_FRAME_LIMIT = 500
-
-
-def atomic_write_text(filepath, text):
-    """Write UTF-8 text without exposing a truncated destination on failure."""
-    directory = os.path.dirname(filepath) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".policy-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, filepath)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
 
 
 def evaluate_working_baseline(env, working_path, mutator, max_frames=5000, verbose=True, action_repeat=1):
@@ -148,20 +123,6 @@ def preserve_frontier_screenshot(
     return destination
 
 
-def build_policy_load_failure(error):
-    reason = f"Policy failed to load: {error}"
-    return 0.0, 0, 0, reason, None, [], {"load_error": str(error)}
-
-
-def capture_screenshot(env, filepath=None):
-    try:
-        if filepath is not None:
-            return env.get_screenshot(filepath)
-        return env.get_screenshot()
-    except TypeError:
-        return env.get_screenshot()
-
-
 def clear_candidate_recording(record_dir, candidate_idx):
     candidate_bk2_path = os.path.join(record_dir, f"candidate_{candidate_idx}.bk2")
     if os.path.exists(candidate_bk2_path):
@@ -244,422 +205,6 @@ def prepare_candidate_policy(candidate_path, code, reasoning, mutator, archive):
         "policy": repaired_policy,
         "load_error": repaired_error,
     }
-
-
-def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_repeat=1):
-    obs = env.reset()
-    frames_alive = 0
-    max_x = 0
-    done = False
-    stuck_counter = 0
-    failure_reason = None
-    state = {}
-    completion_x = None
-    action_repeat = max(1, int(action_repeat or 1))
-
-    # Continuous play-through bookkeeping. max_x is the furthest point in the
-    # *current* act; cumulative_distance banks the distance of acts already
-    # cleared, and levels_cleared counts how many acts were beaten this episode.
-    levels_cleared = 0
-    cumulative_distance = 0
-    prev_zone_act = None
-    settle_frames_left = 0
-    settle_origin_x = 0
-    runtime_error = None
-
-    current_vision_context = "UNKNOWN"
-
-    trace = []
-    context_screenshots = []
-    vision_poll_count = 0
-    # Initialise so both samplers fire on the first iteration. Using elapsed
-    # frames rather than `frames_alive % N == 0` means the cadence is preserved
-    # even when action_repeat does not evenly divide the interval.
-    last_vision_frame = -VISION_INTERVAL
-    last_trace_frame = -TRACE_INTERVAL
-
-    # Proactive vision polling tags the upcoming hazard every VISION_INTERVAL
-    # frames. It is a slow model call, so it runs single-flight on a background
-    # thread. Disable it (SONIC_PROACTIVE_VISION=0) when the vision model shares
-    # an endpoint with the code model: the polls would compete for the same local
-    # model and rarely finish before a fast headless eval ends. The death-frame
-    # analysis on a fatal failure is unaffected either way.
-    proactive_vision = os.environ.get("SONIC_PROACTIVE_VISION", "1") != "0"
-
-    try:
-        runner = PolicyRunner(policy)
-    except Exception as e:
-        reason = f"Policy runner failed to start: {type(e).__name__}: {e}"
-        return (
-            0.0,
-            0,
-            0,
-            reason,
-            capture_screenshot(env),
-            [],
-            {"runtime_error": reason},
-        )
-    vision_executor = (
-        concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision")
-        if proactive_vision else None
-    )
-    vision_future = None
-
-    def valid_zone_act(zone_act):
-        return zone_act[0] is not None and zone_act[1] is not None
-
-    def is_forward_transition(previous, current):
-        if not valid_zone_act(previous) or not valid_zone_act(current):
-            return False
-        try:
-            previous_zone, previous_act = map(int, previous)
-            current_zone, current_act = map(int, current)
-        except (TypeError, ValueError):
-            return False
-        return current_zone > previous_zone or (
-            current_zone == previous_zone and current_act > previous_act
-        )
-
-    def update_authoritative_progress(authoritative_state, frames_advanced):
-        nonlocal completion_x, cumulative_distance, levels_cleared
-        nonlocal max_x, prev_zone_act, settle_frames_left, settle_origin_x
-        nonlocal stuck_counter
-
-        zone_act = (authoritative_state.get("zone"), authoritative_state.get("act"))
-        transitioned = False
-        if prev_zone_act is None or (not valid_zone_act(prev_zone_act) and valid_zone_act(zone_act)):
-            prev_zone_act = zone_act
-        elif is_forward_transition(prev_zone_act, zone_act):
-            settle_origin_x = max_x
-            cumulative_distance += max_x
-            levels_cleared += 1
-            max_x = 0
-            stuck_counter = 0
-            settle_frames_left = LEVEL_SETTLE_FRAMES
-            prev_zone_act = zone_act
-            completion_x = None
-            transitioned = True
-            if verbose:
-                print(
-                    f"Level cleared! Entering zone {zone_act[0]} act {zone_act[1]} "
-                    f"(total cleared: {levels_cleared})"
-                )
-
-        state_completion_x = authoritative_state.get("screen_x_end") or authoritative_state.get("completion_x")
-        if state_completion_x:
-            completion_x = state_completion_x
-
-        current_x = authoritative_state.get("x_pos", 0)
-        if transitioned:
-            # The act flag can change before x resets. Do not count that stale
-            # high x in both the cleared act and the new act.
-            if current_x < settle_origin_x:
-                max_x = current_x
-            return zone_act
-
-        if settle_frames_left > 0:
-            settle_frames_left = max(0, settle_frames_left - frames_advanced)
-            if current_x < settle_origin_x and current_x > max_x:
-                max_x = current_x
-            stuck_counter = 0
-        elif current_x > max_x:
-            max_x = current_x
-            stuck_counter = 0
-        elif authoritative_state.get("level_end_bonus"):
-            stuck_counter = 0
-        else:
-            stuck_counter += frames_advanced
-        return zone_act
-
-    try:
-        state = env.get_state()
-        zone_act = update_authoritative_progress(state, 0)
-        while not done and frames_alive < max_frames:
-            if proactive_vision:
-                # Pick up the most recent finished vision result without blocking.
-                if vision_future is not None and vision_future.done():
-                    try:
-                        current_vision_context = vision_future.result()
-                    except Exception:
-                        current_vision_context = "UNKNOWN"
-                    vision_future = None
-
-                # Kick off the next proactive vision poll in the background.
-                if frames_alive - last_vision_frame >= VISION_INTERVAL and vision_future is None:
-                    last_vision_frame = frames_alive
-                    slot = vision_poll_count % CONTEXT_SCREENSHOT_SLOTS
-                    vision_poll_count += 1
-                    context_path = f"artifacts/failures/context_slot{slot}.png"
-                    shot = capture_screenshot(env, context_path)
-                    if shot:
-                        context_screenshots.append(shot)
-                        context_screenshots = context_screenshots[-CONTEXT_SCREENSHOT_SLOTS:]
-                        vision_future = vision_executor.submit(mutator.analyze_environment, shot)
-
-            policy_state = dict(state)
-            policy_state["vision_context"] = current_vision_context
-
-            try:
-                action_string = runner.get_action(policy_state, timeout=0.5)
-            except PolicyTimeout:
-                if verbose:
-                    print("Policy timed out (infinite loop?)")
-                done = True
-                runtime_error = "PolicyTimeout: get_action exceeded 0.5 seconds"
-                # "timeout" keyword routes this to the local code model (it is a
-                # code bug, not a visual hazard) and triggers lesson extraction.
-                failure_reason = "Policy code timeout (likely an infinite loop in get_action)."
-                break
-            except Exception as e:
-                if verbose:
-                    print(f"Policy threw exception: {e}")
-                done = True
-                runtime_error = f"{type(e).__name__}: {e}"
-                failure_reason = f"Policy code exception: {runtime_error}"
-                break
-
-            if type(action_string) is not str:
-                done = True
-                runtime_error = f"get_action returned non-string {type(action_string).__name__}"
-                failure_reason = f"Policy code returned a non-string action: {type(action_string).__name__}"
-                break
-            if len(action_string) > 128:
-                done = True
-                runtime_error = f"get_action returned an oversized action string ({len(action_string)} characters)"
-                failure_reason = "Policy code returned an oversized action string."
-                break
-
-            # Record a rich trace entry at a fixed frame cadence.
-            if frames_alive - last_trace_frame >= TRACE_INTERVAL:
-                last_trace_frame = frames_alive
-                trace.append(build_trace_entry(frames_alive, policy_state, action_string))
-
-            action = action_string_to_array(action_string)
-
-            frames_before_action = frames_alive
-            for _ in range(action_repeat):
-                if done or frames_alive >= max_frames:
-                    break
-                obs, reward, done, info = env.step(action)
-                frames_alive += 1
-
-            state = env.get_state()
-            zone_act = update_authoritative_progress(state, frames_alive - frames_before_action)
-
-            if stuck_counter > STUCK_FRAME_LIMIT:
-                if verbose:
-                    print("Sonic got stuck! Terminating run.")
-                done = True
-                level_suffix = ""
-                if zone_act and zone_act[0] is not None:
-                    level_suffix = f" (zone {zone_act[0]} act {zone_act[1]})"
-                # "stuck" keyword routes this to the local code model (a physics/
-                # logic bug) and triggers lesson extraction.
-                failure_reason = "Sonic got stuck: stopped making forward progress for 8 seconds." + level_suffix
-                break
-    finally:
-        runner.close()
-        if vision_executor is not None:
-            vision_executor.shutdown(wait=False)
-
-    if failure_reason is not None:
-        pass
-    elif frames_alive >= max_frames:
-        failure_reason = "Timeout reached."
-    elif not done:
-        failure_reason = "Unknown early termination."
-    else:
-        failure_reason = "Sonic lost a life or hit a fatal obstacle."
-
-    if runtime_error is not None:
-        fitness = 0.0
-        max_x = 0
-        components = {"runtime_error": runtime_error}
-    elif completion_x:
-        fitness, components = calculate_fitness(
-            max_x,
-            frames_alive,
-            state.get('rings', 0),
-            state.get('score', 0),
-            completion_x=completion_x,
-            levels_cleared=levels_cleared,
-            cumulative_distance=cumulative_distance,
-        )
-    else:
-        fitness, components = calculate_fitness(
-            max_x,
-            frames_alive,
-            state.get('rings', 0),
-            state.get('score', 0),
-            levels_cleared=levels_cleared,
-            cumulative_distance=cumulative_distance,
-        )
-
-    screenshot_path = capture_screenshot(env)
-    montage_path = build_screenshot_montage(
-        context_screenshots + ([screenshot_path] if screenshot_path else []),
-        "artifacts/failures/latest_context_montage.png",
-    )
-    if montage_path:
-        screenshot_path = montage_path
-
-    return fitness, frames_alive, max_x, failure_reason, screenshot_path, trace[-10:], components
-
-def policy_action_signature(code):
-    actions = set()
-    for match in re.finditer(r"return\s+['\"]([^'\"]*)['\"]", code):
-        actions.add(match.group(1).strip() or "NOOP")
-    if not actions:
-        return "dynamic"
-    return "|".join(sorted(actions))
-
-
-def parse_pool_fitness(path):
-    name = os.path.basename(path)
-    if name.startswith("pool_"):
-        name = name[len("pool_"):]
-    if name.endswith(".py"):
-        name = name[:-len(".py")]
-    value = name.split("_", 1)[0]
-    return float(value)
-
-
-def update_pool(code, fitness, pool_dir="policies/pool", max_size=6):
-    os.makedirs(pool_dir, exist_ok=True)
-    code_hash = hashlib.sha1(code.encode("utf-8")).hexdigest()[:8]
-    new_path = os.path.join(pool_dir, f"pool_{fitness:.2f}_{code_hash}.py")
-    atomic_write_text(new_path, code)
-
-    pool = []
-    for path in glob.glob(os.path.join(pool_dir, "pool_*.py")):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                pool_code = f.read()
-            pool.append(
-                {
-                    "fitness": parse_pool_fitness(path),
-                    "path": path,
-                    "signature": policy_action_signature(pool_code),
-                }
-            )
-        except (OSError, UnicodeError, ValueError):
-            pass
-
-    species_leaders = {}
-    for entry in sorted(pool, key=lambda item: item["fitness"], reverse=True):
-        species_leaders.setdefault(entry["signature"], entry)
-
-    selected_paths = []
-    for entry in sorted(species_leaders.values(), key=lambda item: item["fitness"], reverse=True):
-        if len(selected_paths) < max_size:
-            selected_paths.append(entry["path"])
-
-    for entry in sorted(pool, key=lambda item: item["fitness"], reverse=True):
-        if len(selected_paths) >= max_size:
-            break
-        if entry["path"] not in selected_paths:
-            selected_paths.append(entry["path"])
-
-    for entry in pool:
-        if entry["path"] not in selected_paths:
-            try:
-                os.remove(entry["path"])
-            except OSError:
-                pass
-
-
-def load_pool_codes(pool_dir="policies/pool"):
-    """Read every policy currently in the FunSearch population pool."""
-    codes = []
-    for pf in glob.glob(os.path.join(pool_dir, "pool_*.py")):
-        try:
-            with open(pf, "r", encoding="utf-8") as f:
-                codes.append(f.read())
-        except (OSError, UnicodeError):
-            pass
-    return codes
-
-
-def build_frontier_guard_candidate(working_code, trace, sample_count=3, x_radius=25):
-    """Add one narrow recovery guard when the working policy repeatedly stalls."""
-    samples = list(trace or [])[-sample_count:]
-    if len(samples) < sample_count:
-        return None
-
-    zone = samples[-1].get("zone")
-    act = samples[-1].get("act")
-    xs = [int(sample.get("x", 0)) for sample in samples]
-    velocities = [abs(float(sample.get("x_velocity", 0) or 0)) for sample in samples]
-    if any((sample.get("zone"), sample.get("act")) != (zone, act) for sample in samples):
-        return None
-    if max(xs) - min(xs) > x_radius or max(velocities) >= 0.5:
-        return None
-
-    frontier_x = round(sum(xs) / len(xs))
-    marker = f"# FRONTIER_GUARD zone={zone} act={act} x={frontier_x}"
-    for existing_zone, existing_act, existing_x in re.findall(
-        r"# FRONTIER_GUARD zone=(\S+) act=(\S+) x=(-?\d+)",
-        working_code,
-    ):
-        if (
-            existing_zone == str(zone)
-            and existing_act == str(act)
-            and abs(int(existing_x) - frontier_x) <= x_radius * 2
-        ):
-            return None
-
-    last_action = str(samples[-1].get("action", ""))
-    recovery_action = "RIGHT,B" if "DOWN" in last_action or "B" not in last_action else "RIGHT"
-
-    try:
-        tree = ast.parse(working_code)
-        function = next(
-            node for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "get_action"
-        )
-        first_body_line = function.body[0].lineno - 1
-    except (SyntaxError, StopIteration, IndexError):
-        return None
-
-    lines = working_code.splitlines(keepends=True)
-    indent = lines[first_body_line][:len(lines[first_body_line]) - len(lines[first_body_line].lstrip())]
-    lower = frontier_x - x_radius
-    upper = frontier_x + x_radius
-    guard = [
-        f"{indent}{marker}\n",
-        f"{indent}if (\n",
-        f"{indent}    state.get(\"zone\") == {zone!r}\n",
-        f"{indent}    and state.get(\"act\") == {act!r}\n",
-        f"{indent}    and {lower} <= state.get(\"x_pos\", 0) <= {upper}\n",
-        f"{indent}    and abs(state.get(\"x_velocity\", 0)) < 0.5\n",
-        f"{indent}):\n",
-        f"{indent}    return \"{recovery_action}\"\n",
-        "\n",
-    ]
-    candidate = "".join(lines[:first_body_line] + guard + lines[first_body_line:])
-    try:
-        validate_policy_source(candidate)
-    except Exception:
-        return None
-    return candidate
-
-
-def frontier_guard_marker(code):
-    match = re.search(r"# FRONTIER_GUARD zone=\S+ act=\S+ x=-?\d+", code or "")
-    return match.group(0) if match else None
-
-
-def recently_attempted_frontier_guard(marker, recent_history):
-    for entry in recent_history or []:
-        recorded_marker = entry.get("frontier_guard_marker")
-        if recorded_marker is None:
-            recorded_marker = entry.get("components", {}).get("frontier_guard_marker")
-        recorded_markers = entry.get("components", {}).get("frontier_guard_markers", [])
-        if marker in recorded_markers:
-            return True
-        if recorded_marker == marker:
-            return True
-    return False
 
 
 def generate_candidates(
@@ -757,6 +302,7 @@ def derive_resume_state(history_entries):
             "all_time_champion_fitness": -1.0,
             "start_generation": 1,
             "stagnation_counter": 0,
+            "champion_max_frames": None,
         }
     def number(entry, key, default, converter):
         try:
@@ -767,15 +313,44 @@ def derive_resume_state(history_entries):
         except (OverflowError, TypeError, ValueError):
             return default
 
+    champion_entry = max(
+        history_entries, key=lambda entry: number(entry, "fitness", -1.0, float)
+    )
+
     return {
-        "all_time_champion_fitness": max(
-            number(entry, "fitness", -1.0, float) for entry in history_entries
-        ),
+        "all_time_champion_fitness": number(champion_entry, "fitness", -1.0, float),
         "start_generation": number(history_entries[-1], "generation", 0, int) + 1,
         "stagnation_counter": number(
             history_entries[-1], "stagnation_counter", 0, int
         ),
+        "champion_max_frames": number(champion_entry, "max_frames", None, int),
     }
+
+
+def resolve_working_fitness_floor(
+    baseline_fitness,
+    champion_fitness,
+    champion_max_frames,
+    current_max_frames,
+    verbose=True,
+):
+    """Pick the promotion bar for a (possibly resumed) run.
+
+    Fitness scales with the frame budget, so flooring the bar at a historical
+    champion measured under a *different* ``max_frames`` makes the bar
+    unreachable (smaller budget) or trivial (larger budget) and the loop
+    stagnates forever. Legacy histories without a recorded budget keep the old
+    flooring behaviour.
+    """
+    if champion_max_frames is not None and int(champion_max_frames) != int(current_max_frames):
+        if verbose and champion_fitness > baseline_fitness:
+            print(
+                f"Historical champion fitness {champion_fitness:.2f} was measured at "
+                f"max_frames={champion_max_frames}, but this run uses max_frames={current_max_frames}. "
+                f"Using the re-evaluated baseline {baseline_fitness:.2f} as the promotion bar."
+            )
+        return baseline_fitness
+    return max(baseline_fitness, champion_fitness)
 
 
 def candidate_is_promotable(env, policy, components):
@@ -848,8 +423,12 @@ def run_evaluation_loop(
     start_gen = resume_state["start_generation"]
     stagnation_counter = resume_state["stagnation_counter"]
     baseline_context = evaluate_working_baseline(env, working_path, mutator, max_frames, action_repeat=action_repeat)
-    working_fitness = baseline_context["working_fitness"]
-    working_fitness = max(working_fitness, all_time_champion_fitness)
+    working_fitness = resolve_working_fitness_floor(
+        baseline_context["working_fitness"],
+        all_time_champion_fitness,
+        resume_state["champion_max_frames"],
+        max_frames,
+    )
     working_frontier = {
         "failure_reason": baseline_context["last_failure_reason"],
         "trace": baseline_context["last_trace"],
@@ -1019,19 +598,23 @@ def run_evaluation_loop(
             except Exception as e:
                 print(f"Failed to render video: {e}")
 
-        if best_candidate_promotable and best_candidate_fitness > working_fitness:
+        promoted = best_candidate_promotable and best_candidate_fitness > working_fitness
+        working_frontier = select_working_frontier_context(
+            working_frontier,
+            {
+                "failure_reason": best_candidate_reason,
+                "trace": best_candidate_trace,
+                "screenshot": preserve_frontier_screenshot(best_candidate_screenshot)
+                if promoted
+                else best_candidate_screenshot,
+            },
+            promoted=promoted,
+        )
+
+        if promoted:
             print(f"Working policy improved from {working_fitness:.2f} -> {best_candidate_fitness:.2f}")
             working_fitness = best_candidate_fitness
             stagnation_counter = 0
-            working_frontier = select_working_frontier_context(
-                working_frontier,
-                {
-                    "failure_reason": best_candidate_reason,
-                    "trace": best_candidate_trace,
-                    "screenshot": preserve_frontier_screenshot(best_candidate_screenshot),
-                },
-                promoted=True,
-            )
 
             # Update working file
             atomic_write_text(working_path, best_candidate_code)
@@ -1064,7 +647,7 @@ def run_evaluation_loop(
                 atomic_write_text(champion_path, best_candidate_code)
 
             # Archive the winning candidate
-            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
+            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components, max_frames=max_frames)
         else:
             print(f"No candidate beat the working policy ({working_fitness:.2f}). Stagnation counter: {stagnation_counter + 1}")
             stagnation_counter += 1
@@ -1077,7 +660,7 @@ def run_evaluation_loop(
                     print(f"Failed to extract lesson: {e}")
 
             # We log the generation even if it failed so the dashboard updates
-            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components)
+            history.log_generation(gen, choose_generation_archive_path(best_candidate_path, working_path), best_candidate_fitness, best_candidate_reason, best_candidate_screenshot, best_candidate_reasoning, stagnation_counter, best_candidate_components, max_frames=max_frames)
 
 
 def main(argv=None):

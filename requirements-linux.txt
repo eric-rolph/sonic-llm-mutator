@@ -1,0 +1,12 @@
+# Linux / stable-retro training stack (Python 3.8-3.12; used by the Dockerfile).
+# This is the modern counterpart to requirements.txt, which targets the legacy
+# Windows + Python 3.8 + gym-retro environment.
+
+stable-retro>=1.0,<2.0
+
+numpy>=1.21
+# Headless build: no X/libGL needed in containers or CI.
+opencv-python-headless>=4.5,<5.0
+
+openai>=1.0,<2.0
+tenacity>=8.0

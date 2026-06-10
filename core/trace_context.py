@@ -51,6 +51,24 @@ def trace_entry_x(entry):
     return 0
 
 
+def trace_entry_zone_act(entry):
+    """Return ``(zone, act)`` from a trace entry, or ``(None, None)`` when absent.
+
+    Legacy tuple traces carry no level identity, so they yield ``(None, None)``
+    rather than a fabricated zone 0 act 0.
+    """
+    if not isinstance(entry, dict):
+        return None, None
+
+    def level_int(value):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    return level_int(entry.get("zone")), level_int(entry.get("act"))
+
+
 def build_screenshot_montage(image_paths, output_path, max_images=4, columns=2):
     """Combine recent screenshots into a small grid for visual mutation prompts."""
     if cv2 is None or np is None:

@@ -43,6 +43,12 @@ class RunPipelineTests(unittest.TestCase):
 
             bin_path = root / "bin"
             bin_path.mkdir()
+            # Windows resolves `python` to python.cmd via PATHEXT; on Linux
+            # pwsh resolves the executable extensionless stub. Without the
+            # POSIX stub the real interpreter runs: the `-c` retro check then
+            # accidentally succeeds (the fixture's retro/ directory in CWD is
+            # importable as a namespace package) and `python -u main.py` fails
+            # with CPython's exit code 2 instead of the stub's 23.
             (bin_path / "python.cmd").write_text(
                 "@echo off\n"
                 'if "%1"=="-c" (\n'
@@ -52,6 +58,17 @@ class RunPipelineTests(unittest.TestCase):
                 "exit /b 23\n",
                 encoding="ascii",
             )
+            posix_stub = bin_path / "python"
+            posix_stub.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "-c" ]; then\n'
+                f'  echo "{retro_path}"\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 23\n",
+                encoding="ascii",
+            )
+            posix_stub.chmod(0o755)
             env = os.environ.copy()
             env["PATH"] = f"{bin_path}{os.pathsep}{env['PATH']}"
 

@@ -1,7 +1,10 @@
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
 import benchmark_policies
+from core.policy_validator import PolicyValidationError
 
 
 class BenchmarkPoliciesTests(unittest.TestCase):
@@ -50,6 +53,17 @@ class BenchmarkPoliciesTests(unittest.TestCase):
         args = benchmark_policies.parse_args(["--action-repeat", "3"])
 
         self.assertEqual(args.action_repeat, 3)
+
+    def test_benchmark_loader_enforces_the_policy_sandbox_contract(self):
+        # The benchmark previously exec'd policies with full builtins,
+        # bypassing the validator used everywhere else.
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = os.path.join(tmp, "escape.py")
+            with open(policy_path, "w", encoding="utf-8") as f:
+                f.write("import os\ndef get_action(state):\n    return 'RIGHT'\n")
+
+            with self.assertRaises(PolicyValidationError):
+                benchmark_policies.load_policy(policy_path)
 
     def test_run_benchmark_reports_backend_failures_as_rows(self):
         with patch.object(

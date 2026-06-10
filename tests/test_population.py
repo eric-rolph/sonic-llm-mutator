@@ -142,6 +142,69 @@ class PopulationArchiveTests(unittest.TestCase):
         self.assertEqual(visits[valid_a["policy_id"]], 1)
         self.assertEqual(visits[valid_b["policy_id"]], 1)
 
+    def test_index_stays_slim_and_details_hold_full_context(self):
+        # The index is rewritten on every evaluation, so traces and unbounded
+        # text must never accumulate in it.
+        long_trace = [{"zone": 0, "act": 0, "x": i, "action": "RIGHT"} for i in range(50)]
+        long_reasoning = "why " * 500
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = PopulationArchive(tmp)
+            record = archive.record_evaluation(
+                policy_returning("RIGHT"),
+                fitness=100.0,
+                components={"distance": 100},
+                failure_reason="stuck",
+                trace=long_trace,
+                reasoning=long_reasoning,
+            )
+
+            index = json.loads((Path(tmp) / "index.json").read_text())
+            indexed = index["candidates"][0]
+            details = archive.load_details(record["policy_id"])
+
+        self.assertNotIn("trace", indexed)
+        self.assertNotIn("components", indexed)
+        self.assertLessEqual(len(indexed["reasoning"]), 300)
+        self.assertEqual(details["trace"], long_trace)
+        self.assertEqual(details["reasoning"], long_reasoning)
+        self.assertEqual(details["components"], {"distance": 100})
+
+    def test_legacy_records_with_inline_traces_migrate_to_details_on_save(self):
+        legacy_trace = [{"zone": 0, "act": 1, "x": 1077}]
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy_record = {
+                "policy_id": "legacy0000000000",
+                "code_hash": "0" * 64,
+                "code_path": "policies/legacy0000000000.py",
+                "fitness": 50.0,
+                "components": {"distance": 50},
+                "failure_reason": "stuck",
+                "trace": legacy_trace,
+                "reasoning": "legacy reasoning",
+                "behavior_descriptor": "RIGHT",
+                "obstacle_key": "zone-0-act-1-x-1000-stuck",
+                "evaluations": 1,
+                "selection_visits": 0,
+            }
+            (Path(tmp)).mkdir(exist_ok=True)
+            (Path(tmp) / "index.json").write_text(
+                json.dumps({"candidates": [legacy_record]}), encoding="utf-8"
+            )
+
+            archive = PopulationArchive(tmp)
+            archive.record_evaluation(policy_returning("RIGHT,B"), fitness=10.0)
+
+            index = json.loads((Path(tmp) / "index.json").read_text())
+            migrated = index["candidates"][0]
+            details = archive.load_details("legacy0000000000")
+
+        self.assertNotIn("trace", migrated)
+        self.assertNotIn("components", migrated)
+        self.assertEqual(migrated["fitness"], 50.0)
+        self.assertEqual(details["trace"], legacy_trace)
+        self.assertEqual(details["components"], {"distance": 50})
+        self.assertEqual(details["reasoning"], "legacy reasoning")
+
     def test_select_parent_codes_does_not_record_visits_without_two_valid_parents(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = PopulationArchive(tmp)

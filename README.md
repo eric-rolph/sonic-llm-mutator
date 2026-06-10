@@ -1,7 +1,7 @@
 # Sonic LLM Mutator
 
 ![Dashboard Screenshot](docs/dashboard.png)
-This project uses a Large Language Model (LLM) as a genetic algorithm mutator to learn how to play Sonic the Hedgehog. The system drives Sonic through a retro emulator backend, exposes game state through an MCP server, and uses a local CI/CD pipeline script to iteratively test and evolve the Python script that controls Sonic.
+This project uses a Large Language Model (LLM) as a genetic algorithm mutator to learn how to play Sonic the Hedgehog. The system drives Sonic through a retro emulator backend and uses a local CI/CD pipeline script to iteratively test and evolve the Python script that controls Sonic. An optional MCP server exposes the emulator for interactive debugging.
 
 ## Watch it in Action
 
@@ -15,11 +15,12 @@ This project uses a Large Language Model (LLM) as a genetic algorithm mutator to
 
 ## Architecture
 
-1.  **Emulator MCP Server (`emulator/`)**: Wraps a retro emulator backend and exposes Sonic's game state (velocity, coordinates, surrounding tiles) as discrete tools.
-2.  **LLM Mutator (`llm/`)**: Acts as the genetic mutation engine. It queries the MCP server when Sonic dies to understand the failure context, then rewrites the control policy. It routes heavy visual debugging to a cloud vision model (like OpenRouter or Gemini) and minor tweaks to any local LLM (like Ollama or LM Studio).
+1.  **Emulator Wrapper (`emulator/sonic_env.py`)**: Wraps a retro emulator backend (stable-retro or legacy gym-retro) and exposes Sonic's game state (velocity, coordinates, zone/act, rings) as a plain state dict.
+2.  **LLM Mutator (`llm/`)**: Acts as the genetic mutation engine. When a run fails it rewrites the control policy from the failure context (trace, screenshot, semantic memory). It routes heavy visual debugging to a cloud vision model (like OpenRouter or Gemini) and minor tweaks to any local LLM (like Ollama or LM Studio).
 3.  **Core Orchestrator (`core/` & `main.py`)**: Runs the current policy, calculates fitness (penalizing stagnation), and manages the automated evolutionary pipeline.
-4.  **Policies (`policies/`)**: Contains the generated Python scripts that decide the button presses for each frame.
+4.  **Policies (`policies/`)**: Contains the generated Python scripts that decide the button presses for each frame. The best evolved policy (`champion_policy.py`) and its extracted skill library (`skills.py`) are committed so a fresh clone can inspect and benchmark the headline result.
 5.  **Web Dashboard (`dashboard.py`)**: A live Streamlit interface that tracks fitness progression and visually plays `.mp4` recordings of both the Champion and Latest mutation attempts.
+6.  **Optional MCP Debugging Sidecar (`emulator/mcp_server.py`)**: A small FastMCP server (`reset_game`, `get_game_state`, `get_screenshot`, `step_frames`) for poking at the emulator interactively from an MCP client such as Claude. It is *not* part of the training loop today; the planned next step is agentic failure diagnosis, where the vision model gets these tools to replay and step around a failure instead of judging a single static frame.
 
 ## Intelligent Universal LLM Routing
 
@@ -84,6 +85,30 @@ To ensure the pipeline can run continuously without manual intervention:
 
 ## Setup
 
+### Linux / WSL / Docker (recommended: Python 3.10-3.12 + stable-retro)
+
+```bash
+python -m venv venv && . venv/bin/activate
+pip install -r requirements-linux.txt
+python -m stable_retro.import /path/to/your/roms
+python main.py
+```
+
+Or use the container (see the [Dockerfile](Dockerfile) header for the full
+run command, including how to reach a model server on the host):
+
+```bash
+docker build -t sonic-llm-mutator .
+docker run --rm -v "$PWD:/app" -v /path/to/roms:/roms --env-file .env \
+    sonic-llm-mutator sh -c "python -m stable_retro.import /roms && python main.py"
+```
+
+### Windows (legacy: Python 3.8 + gym-retro)
+
+`gym-retro` does not publish Windows wheels beyond Python 3.8 (which is EOL),
+so native Windows stays on the pinned legacy environment — prefer WSL above
+for new setups.
+
 1.  Install dependencies:
     ```bash
     uv venv --python 3.8 venv
@@ -92,13 +117,16 @@ To ensure the pipeline can run continuously without manual intervention:
     uv pip install -r requirements-dashboard.txt    # optional: Streamlit dashboard
     uv pip install -r requirements-dev.txt          # optional: run tests + ruff
     ```
-    On Linux/WSL you can use the maintained `stable-retro` backend instead of
-    `gym-retro` (`pip install stable-retro`); the runtime auto-detects it.
 2.  Import the Sonic the Hedgehog ROM:
     ```bash
     python -m retro.import /path/to/your/roms
     ```
-3.  Configure API keys in your environment (Powershell example):
+
+### Configure model endpoints
+
+Copy [.env.example](.env.example) to `.env` and fill it in (`run_pipeline.ps1`
+loads it automatically; on Linux source it with `set -a; . ./.env; set +a`),
+or export the variables directly (PowerShell example):
     ```bash
     # Cloud Vision Provider (OpenRouter, Gemini, Anthropic, OpenAI, Kimi)
     $env:MACRO_API_KEY="your_api_key_here"
@@ -117,21 +145,23 @@ To ensure the pipeline can run continuously without manual intervention:
     $env:MACRO_API_KEY="lm-studio"; $env:MACRO_BASE_URL="http://localhost:1234/v1"; $env:MACRO_MODEL="your-vision-model"
     $env:SONIC_PROACTIVE_VISION="0"   # skip proactive polling on a shared local endpoint
     ```
-4.  Run the evolutionary pipeline:
-    ```bash
-    python main.py
-    ```
-    For a bounded resume test, `--generations` means additional generations
-    from the current history endpoint:
-    ```powershell
-    .\run_pipeline.ps1 -Generations 15 -Frames 12000
-    # Equivalent:
-    python main.py --generations 15 --frames 12000
-    ```
-5.  Run the live dashboard in a separate terminal:
-    ```bash
-    streamlit run dashboard.py
-    ```
+### Run
+
+Run the evolutionary pipeline:
+```bash
+python main.py
+```
+For a bounded resume test, `--generations` means additional generations
+from the current history endpoint:
+```powershell
+.\run_pipeline.ps1 -Generations 15 -Frames 12000
+# Equivalent:
+python main.py --generations 15 --frames 12000
+```
+Run the live dashboard in a separate terminal:
+```bash
+streamlit run dashboard.py
+```
 
 ## Development
 
@@ -143,7 +173,9 @@ python -m unittest discover -s tests
 ruff check .
 ```
 
-CI runs the same lint + test steps on Python 3.8 and 3.11 (`.github/workflows/evaluate_policy.yml`).
+CI runs the same lint + test steps on Python 3.8, 3.11 and 3.12, plus a real
+stable-retro emulator smoke test against the bundled homebrew Airstriker ROM
+(`.github/workflows/evaluate_policy.yml`).
 
 ## Speedrun-First, Continuous Play-Through
 

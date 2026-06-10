@@ -41,10 +41,18 @@ def make_retro_env(module, game=DEFAULT_GAME, state=DEFAULT_STATE, record_path=N
     if record_path is not None:
         kwargs["record"] = record_path
 
+    is_stable = getattr(module, "__name__", "") == "stable_retro"
+    if is_stable and "render_mode" not in kwargs:
+        # stable-retro defaults to render_mode="human", which opens a pyglet/
+        # OpenGL viewer on reset() -- impossible on headless training boxes,
+        # containers, and CI. Training reads frames from the observation, so
+        # default to no rendering; callers can still pass render_mode through.
+        kwargs["render_mode"] = None
+
     try:
         return module.make(**kwargs)
     except Exception:
-        if getattr(module, "__name__", "") == "stable_retro" and not str(game).endswith("-v0"):
+        if is_stable and not str(game).endswith("-v0"):
             retry_kwargs = dict(kwargs)
             retry_kwargs["game"] = f"{game}-v0"
             return module.make(**retry_kwargs)

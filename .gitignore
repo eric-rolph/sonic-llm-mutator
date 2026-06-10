@@ -13,7 +13,12 @@ get-pip.py
 
 # Project specific
 artifacts/
-policies/
+# Generated policies stay out of git, but the evolved showcase artifacts are
+# tracked: `policies/*` (not `policies/`) lets the negations re-include files
+# inside the directory.
+policies/*
+!policies/champion_policy.py
+!policies/skills.py
 *.png
 *.mp4
 *.bin

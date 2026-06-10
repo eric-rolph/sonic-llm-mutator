@@ -107,6 +107,38 @@ class SonicEnvBackendTests(unittest.TestCase):
             },
         )
 
+    def test_make_retro_env_defaults_stable_backend_to_headless(self):
+        # stable-retro's render_mode defaults to "human", which needs a real
+        # display (pyglet/GLU) the moment reset() runs. Training is headless.
+        module = FakeModule(FakeGymnasiumEnv())
+        module.__name__ = "stable_retro"
+
+        make_retro_env(module, game="Airstriker-Genesis", state="Level1")
+
+        self.assertIn("render_mode", module.calls[0])
+        self.assertIsNone(module.calls[0]["render_mode"])
+
+    def test_make_retro_env_respects_explicit_render_mode_on_stable(self):
+        module = FakeModule(FakeGymnasiumEnv())
+        module.__name__ = "stable_retro"
+
+        make_retro_env(
+            module,
+            game="Airstriker-Genesis",
+            state="Level1",
+            render_mode="rgb_array",
+        )
+
+        self.assertEqual(module.calls[0]["render_mode"], "rgb_array")
+
+    def test_make_retro_env_never_sends_render_mode_to_legacy_backend(self):
+        # Legacy gym-retro's make() has no render_mode parameter.
+        module = FakeModule(FakeLegacyEnv())
+
+        make_retro_env(module, game="Airstriker-Genesis", state="Level1")
+
+        self.assertNotIn("render_mode", module.calls[0])
+
     def test_wrapper_normalizes_gymnasium_reset_and_step(self):
         module = FakeModule(FakeGymnasiumEnv())
         wrapper = SonicEnvWrapper(
