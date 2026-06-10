@@ -94,8 +94,8 @@
 **Files:**
 - Modify: `emulator/mcp_server.py`
 
-- [ ] Add `list_failure_window`, `view_failure_frame`, `try_failure_actions` tools backed by `core/diagnosis.py` and the persisted window, reusing the server's singleton env.
-- [ ] Run `.\venv38\Scripts\python.exe -m compileall emulator/mcp_server.py` (mcp package optional locally; keep imports lazy-safe).
+- [x] Add `list_failure_window`, `view_failure_frame`, `try_failure_actions` tools backed by `core/diagnosis.py` and the persisted window (the session builds its own non-recording env so seeks never disturb the interactive one).
+- [x] Run `.\venv38\Scripts\python.exe -m compileall emulator/mcp_server.py` (mcp package optional locally; keep imports lazy-safe).
 
 ### Task 8: Document and verify
 
@@ -104,7 +104,7 @@
 - Modify: `.env.example`
 - Modify: `docs/superpowers/plans/2026-06-09-agentic-failure-diagnosis.md` (check boxes)
 
-- [ ] README: replace "planned next step" wording with the shipped behavior (diagnosis flow, config flag, MCP parity); add `SONIC_AGENTIC_DIAGNOSIS` to `.env.example`.
-- [ ] Run `.\venv38\Scripts\python.exe -m unittest discover -s tests`.
-- [ ] Run `.\venv38\Scripts\python.exe -m ruff check .`.
+- [x] README: replace "planned next step" wording with the shipped behavior (diagnosis flow, config flag, MCP parity); add `SONIC_AGENTIC_DIAGNOSIS` to `.env.example`.
+- [x] Run `.\venv38\Scripts\python.exe -m unittest discover -s tests` (221 tests OK).
+- [x] Run `.\venv38\Scripts\python.exe -m ruff check .` (clean).
 - [ ] Push branch, open PR, watch CI (including the real-emulator savestate smoke), merge when green.

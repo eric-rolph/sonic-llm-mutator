@@ -4,6 +4,7 @@ import time
 from mcp.server.fastmcp import FastMCP
 
 from core.actions import action_string_to_array
+from core.diagnosis import DiagnosisSession, load_failure_window, window_key
 from emulator.sonic_env import SonicEnvWrapper
 
 # Initialize the MCP Server
@@ -19,6 +20,34 @@ def get_env():
     if _env is None:
         _env = SonicEnvWrapper()
     return _env
+
+
+# Diagnosis session over the persisted failure window. Uses its own env (via
+# the DiagnosisSession default factory) so seeks/experiments never disturb the
+# interactive env above. Rebuilt whenever training persists a newer window.
+_diagnosis_session = None
+
+def get_diagnosis_session():
+    global _diagnosis_session
+    window = load_failure_window()
+    if window is None:
+        return None, (
+            "No persisted failure window found. Run the training loop until a "
+            "visual failure becomes the working frontier first."
+        )
+    if _diagnosis_session is None or window_key(_diagnosis_session.window) != window_key(window):
+        if _diagnosis_session is not None:
+            _diagnosis_session.close()
+        _diagnosis_session = DiagnosisSession(window)
+    return _diagnosis_session, None
+
+
+def _format_session_result(result):
+    text = str(result.get("text", ""))
+    screenshot = result.get("screenshot")
+    if screenshot:
+        return f"{text}\nScreenshot: {os.path.abspath(screenshot)}"
+    return text
 
 @mcp.tool()
 def reset_game() -> str:
@@ -65,6 +94,41 @@ def step_frames(action_string: str, frames: int = 1) -> str:
             break
 
     return f"Stepped {frames} frames with action {action_string}. Current state: {env.get_state()}"
+
+@mcp.tool()
+def list_failure_window() -> str:
+    """
+    Lists the emulator savestates captured around the most recent training
+    failure (the same window the mutator's agentic diagnosis uses).
+    """
+    session, error = get_diagnosis_session()
+    if error:
+        return error
+    return session.describe_window()
+
+@mcp.tool()
+def view_failure_frame(frames_before_failure: int = 0) -> str:
+    """
+    Seeks the diagnosis emulator to ~N frames before the most recent failure.
+    Returns the authoritative game state and the path to a screenshot.
+    """
+    session, error = get_diagnosis_session()
+    if error:
+        return error
+    return _format_session_result(session.view_frame(frames_before_failure))
+
+@mcp.tool()
+def try_failure_actions(actions: str, frames_before_failure: int = 120, hold_frames: int = 60) -> str:
+    """
+    Counterfactual experiment at the most recent failure: rewind N frames
+    before it, hold a button combination (e.g. 'RIGHT,B') for hold_frames,
+    and report what actually happens — including whether Sonic progressed
+    past the failure point.
+    """
+    session, error = get_diagnosis_session()
+    if error:
+        return error
+    return _format_session_result(session.try_actions(frames_before_failure, actions, hold_frames))
 
 if __name__ == "__main__":
     # Start the FastMCP stdio server

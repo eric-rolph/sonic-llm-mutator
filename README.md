@@ -20,7 +20,8 @@ This project uses a Large Language Model (LLM) as a genetic algorithm mutator to
 3.  **Core Orchestrator (`core/` & `main.py`)**: Runs the current policy, calculates fitness (penalizing stagnation), and manages the automated evolutionary pipeline.
 4.  **Policies (`policies/`)**: Contains the generated Python scripts that decide the button presses for each frame. The best evolved policy (`champion_policy.py`) and its extracted skill library (`skills.py`) are committed so a fresh clone can inspect and benchmark the headline result.
 5.  **Web Dashboard (`dashboard.py`)**: A live Streamlit interface that tracks fitness progression and visually plays `.mp4` recordings of both the Champion and Latest mutation attempts.
-6.  **Optional MCP Debugging Sidecar (`emulator/mcp_server.py`)**: A small FastMCP server (`reset_game`, `get_game_state`, `get_screenshot`, `step_frames`) for poking at the emulator interactively from an MCP client such as Claude. It is *not* part of the training loop today; the planned next step is agentic failure diagnosis, where the vision model gets these tools to replay and step around a failure instead of judging a single static frame.
+6.  **Agentic Failure Diagnosis (`core/diagnosis.py`)**: On a visual failure, the vision model gets *tools* — it rewinds emulator savestates captured before the failure, inspects the authoritative state, and runs counterfactual input experiments ("would `RIGHT,B` from 2 seconds earlier clear this?"). Its verified findings feed the mutation prompt. See [Agentic Failure Diagnosis](#agentic-failure-diagnosis) below.
+7.  **MCP Debugging Sidecar (`emulator/mcp_server.py`)**: A small FastMCP server for poking at the emulator interactively from an MCP client such as Claude — manual play (`reset_game`, `get_game_state`, `get_screenshot`, `step_frames`) plus the *same* failure-window tools the mutator's diagnosis uses (`list_failure_window`, `view_failure_frame`, `try_failure_actions`), so you can replay exactly what the model saw.
 
 ## Intelligent Universal LLM Routing
 
@@ -32,6 +33,21 @@ To maximize efficiency and minimize API costs, the mutator (`llm/mutator.py`) in
     *   *Supported:* **Google Gemini, Anthropic Claude, OpenAI ChatGPT, Kimi (Moonshot), OpenRouter, or any local vision model.**
 
     > A 30-generation run surfaced this: originally "stuck" was treated as a blind code bug and sent to the code model, but with **zero** vision calls the agent could never get past Act 2 geometry it couldn't see (a hard plateau). Stuck failures now get eyes, since being blocked is fundamentally a visual problem.
+
+## Agentic Failure Diagnosis
+
+A static death-frame tells the vision model *where* Sonic failed, but it can only guess *why* and *what would have worked*. Diagnosis makes that experimental:
+
+1. **Capture**: during every evaluation, whole-machine emulator savestates are captured every 60 frames into a small ring (~10 s of history, `core/diagnosis.py`). When a run becomes the working frontier, its window is persisted to `artifacts/diagnosis/window/`.
+2. **Investigate**: before mutating, the vision model is dropped into an interactive session over that window (standard OpenAI function calling, so it works with every supported provider). Its tools:
+   * `view_frame(frames_before_failure)` — rewind a dedicated, non-recording emulator to any captured moment; returns the authoritative RAM state plus a screenshot.
+   * `try_actions(frames_before_failure, actions, hold_frames)` — actually run a counterfactual input (≤300 frames) and report measured movement, ring/life changes, and whether Sonic progressed past the failure point.
+   * `finish_diagnosis(report)` — submit the findings. Budget: 6 tool calls, then a final report is forced.
+3. **Mutate**: the report — ideally containing a *verified* working input sequence, not a guess — is embedded in the mutation prompt, and the diagnosis screenshot replaces the generic montage.
+
+One diagnosis serves the whole generation (all candidates mutate the same frontier) and is cached until the frontier changes, so stagnant generations pay nothing. Disable with `SONIC_AGENTIC_DIAGNOSIS=0`; on any error (no vision key, no savestate support, provider without tool calling) the pipeline silently falls back to the previous one-shot montage behavior.
+
+The same persisted window is exposed through the MCP sidecar (`list_failure_window`, `view_failure_frame`, `try_failure_actions`), so you can interactively replay exactly the failure the mutator was reasoning about.
 
 ## How This Differs from Other LLM Game Agents
 
