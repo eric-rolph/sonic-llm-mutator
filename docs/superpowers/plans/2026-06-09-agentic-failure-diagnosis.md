@@ -36,10 +36,10 @@
 - Create: `core/diagnosis.py`
 - Create: `tests/test_diagnosis.py`
 
-- [ ] `FailureSnapshotRing(interval=60, capacity=10)` with `record(env, frame, state)` (exception-safe, cadence-gated) and `persist(directory, failure_reason, final_state)` writing `<frame>.state` blobs + `window.json` manifest.
-- [ ] `load_failure_window(directory)` returning the manifest with verified blob paths; tolerate missing/corrupt files by returning `None`.
-- [ ] Tests: cadence and capacity, exception-safety when `save_emulator_state` raises, persist/load round-trip, corrupt manifest handling.
-- [ ] Run `.\venv38\Scripts\python.exe -m unittest tests.test_diagnosis -v`.
+- [x] `FailureSnapshotRing(interval=60, capacity=10)` with `record(env, frame, state)` (exception-safe, cadence-gated) and `persist(directory, failure_reason, final_state)` writing `<frame>.state` blobs + `window.json` manifest.
+- [x] `load_failure_window(directory)` returning the manifest with verified blob paths; tolerate missing/corrupt files by returning `None`.
+- [x] Tests: cadence and capacity, exception-safety when `save_emulator_state` raises, persist/load round-trip, corrupt manifest handling.
+- [x] Run `.\venv38\Scripts\python.exe -m unittest tests.test_diagnosis -v`.
 
 ### Task 3: DiagnosisSession (seek, view, counterfactual rollouts)
 
@@ -47,10 +47,10 @@
 - Modify: `core/diagnosis.py`
 - Modify: `tests/test_diagnosis.py`
 
-- [ ] `DiagnosisSession(env_factory, window)`: lazy env creation (non-recording), `describe_window()`, `view_frame(frames_before_failure)` (seek nearest snapshot, return state dict + screenshot path under `artifacts/diagnosis/`), `try_actions(frames_before_failure, actions, hold_frames)` (seek, hold action ≤300 frames, summarize movement + whether failure x was passed, screenshot at end), `close()`.
-- [ ] All operations return error strings instead of raising; a failed step sequence recovers by reseeking.
-- [ ] Tests with a fake env: nearest-snapshot seeking, rollout summary fields, frame cap enforcement, error recovery, screenshots written.
-- [ ] Run `.\venv38\Scripts\python.exe -m unittest tests.test_diagnosis -v`.
+- [x] `DiagnosisSession(env_factory, window)`: lazy env creation (non-recording), `describe_window()`, `view_frame(frames_before_failure)` (seek nearest snapshot, return state dict + screenshot path under `artifacts/diagnosis/`), `try_actions(frames_before_failure, actions, hold_frames)` (seek, hold action ≤300 frames, summarize movement + whether failure x was passed, screenshot at end), `close()`.
+- [x] All operations return error strings instead of raising; a failed step sequence recovers by reseeking.
+- [x] Tests with a fake env: nearest-snapshot seeking, rollout summary fields, frame cap enforcement, error recovery, screenshots written.
+- [x] Run `.\venv38\Scripts\python.exe -m unittest tests.test_diagnosis -v`.
 
 ### Task 4: Snapshot collection during evaluation + frontier window persistence
 

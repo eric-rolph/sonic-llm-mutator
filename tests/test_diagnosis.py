@@ -1,0 +1,225 @@
+import json
+import os
+import tempfile
+import unittest
+
+from core.diagnosis import (
+    TRY_ACTIONS_MAX_FRAMES,
+    DiagnosisSession,
+    FailureSnapshotRing,
+    load_failure_window,
+    window_key,
+)
+
+
+class FakeSavestateEnv:
+    """Savestate-capable env whose x position is encoded in the state bytes."""
+
+    def __init__(self):
+        self.x = 0
+        self.saved = 0
+        self.closed = False
+        self.step_error = None
+
+    def save_emulator_state(self):
+        self.saved += 1
+        return f"state-x-{self.x}".encode("ascii")
+
+    def load_emulator_state(self, state_bytes):
+        self.x = int(state_bytes.decode("ascii").rsplit("-", 1)[1])
+
+    def get_state(self):
+        return {"x_pos": self.x, "y_pos": 100, "zone": 0, "act": 1, "rings": 3, "lives": 3}
+
+    def step(self, action):
+        if self.step_error is not None:
+            raise self.step_error
+        # Holding RIGHT (index 7) advances; anything else stalls.
+        self.x += 10 if action[7] else 0
+        return None, 0, False, {}
+
+    def get_screenshot(self, filepath):
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, "wb") as f:
+            f.write(b"png")
+        return filepath
+
+    def close(self):
+        self.closed = True
+
+
+class BrokenSavestateEnv(FakeSavestateEnv):
+    def save_emulator_state(self):
+        raise RuntimeError("no savestates on this backend")
+
+
+class FailureSnapshotRingTests(unittest.TestCase):
+    def fill_ring(self, env, frames):
+        ring = FailureSnapshotRing(interval=60, capacity=10)
+        for frame in frames:
+            env.x = frame  # make position track the frame for easy assertions
+            ring.record(env, frame, env.get_state())
+        return ring
+
+    def test_record_honours_cadence_and_capacity(self):
+        env = FakeSavestateEnv()
+        ring = self.fill_ring(env, range(0, 1200, 30))  # every 30 frames offered
+
+        # Cadence: only every 60 frames captured; capacity: last 10 kept.
+        self.assertEqual(len(ring.snapshots), 10)
+        frames = [snapshot["frame"] for snapshot in ring.snapshots]
+        self.assertEqual(frames, list(range(600, 1200, 60)))
+
+    def test_backend_without_savestates_disables_ring_silently(self):
+        env = BrokenSavestateEnv()
+        ring = FailureSnapshotRing(interval=1, capacity=5)
+
+        self.assertFalse(ring.record(env, 0, env.get_state()))
+        self.assertTrue(ring.disabled)
+        self.assertFalse(ring.record(env, 100, env.get_state()))
+        self.assertEqual(ring.snapshots, [])
+
+    def test_persist_and_load_round_trip(self):
+        env = FakeSavestateEnv()
+        ring = self.fill_ring(env, [0, 60, 120])
+        final_state = {"x_pos": 150, "y_pos": 90, "zone": 0, "act": 1, "rings": 0, "lives": 2}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = ring.persist(tmp, failure_reason="stuck", final_state=final_state, failure_frame=150)
+            window = load_failure_window(directory)
+
+            self.assertEqual(window["failure_reason"], "stuck")
+            self.assertEqual(window["failure"]["frame"], 150)
+            self.assertEqual(window["failure"]["x_pos"], 150)
+            self.assertEqual(len(window["snapshots"]), 3)
+            self.assertEqual(window["snapshots"][0]["frame"], 0)
+            with open(window["snapshots"][2]["path"], "rb") as f:
+                self.assertEqual(f.read(), b"state-x-120")
+            self.assertIsNotNone(window_key(window))
+
+    def test_persist_replaces_previous_window(self):
+        env = FakeSavestateEnv()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.fill_ring(env, [0, 60]).persist(tmp, failure_reason="first", failure_frame=100)
+            self.fill_ring(env, [600]).persist(tmp, failure_reason="second", failure_frame=700)
+
+            window = load_failure_window(tmp)
+
+            self.assertEqual(window["failure_reason"], "second")
+            self.assertEqual(len(window["snapshots"]), 1)
+            stale = [name for name in os.listdir(tmp) if name == "0.state"]
+            self.assertEqual(stale, [])
+
+    def test_empty_ring_persists_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(FailureSnapshotRing().persist(tmp))
+
+    def test_load_tolerates_missing_and_corrupt_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(load_failure_window(os.path.join(tmp, "missing")))
+
+            with open(os.path.join(tmp, "window.json"), "w", encoding="utf-8") as f:
+                f.write("{not json")
+            self.assertIsNone(load_failure_window(tmp))
+
+            # Valid manifest whose blobs are gone is also unusable.
+            with open(os.path.join(tmp, "window.json"), "w", encoding="utf-8") as f:
+                json.dump({"snapshots": [{"frame": 0, "file": "0.state"}]}, f)
+            self.assertIsNone(load_failure_window(tmp))
+
+
+class DiagnosisSessionTests(unittest.TestCase):
+    def make_session(self, tmp, env=None):
+        ring_env = FakeSavestateEnv()
+        ring = FailureSnapshotRing(interval=60, capacity=10)
+        for frame in (0, 60, 120, 180):
+            ring_env.x = frame * 2  # x advances faster than frames
+            ring.record(ring_env, frame, ring_env.get_state())
+        window_dir = os.path.join(tmp, "window")
+        ring.persist(
+            window_dir,
+            failure_reason="Sonic got stuck",
+            final_state={"x_pos": 400, "y_pos": 100, "zone": 0, "act": 1, "rings": 0, "lives": 3},
+            failure_frame=200,
+        )
+        window = load_failure_window(window_dir)
+        session_env = env or FakeSavestateEnv()
+        session = DiagnosisSession(
+            window,
+            env_factory=lambda: session_env,
+            screenshot_dir=os.path.join(tmp, "shots"),
+        )
+        return session, session_env
+
+    def test_describe_window_lists_offsets_and_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, _ = self.make_session(tmp)
+            text = session.describe_window()
+
+        self.assertIn("offset=200", text)  # frame 0 is 200 frames before failure
+        self.assertIn("offset=20", text)   # frame 180
+        self.assertIn("Failure moment: frame=200 x=400", text)
+
+    def test_view_frame_seeks_nearest_snapshot_and_screenshots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp)
+
+            # 70 frames before failure(200) = frame 130 -> nearest at-or-before is 120.
+            result = session.view_frame(70)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(env.x, 240)  # snapshot at frame 120 had x=240
+            self.assertIn('"x_pos": 240', result["text"])
+            self.assertTrue(os.path.exists(result["screenshot"]))
+            self.assertEqual(session.last_screenshot, result["screenshot"])
+
+    def test_try_actions_reports_progress_past_failure_x(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp)
+
+            # From frame 180 (x=360), holding RIGHT for 30 frames -> x=660 > 400.
+            result = session.try_actions(20, "RIGHT", 30)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["passed_failure_x"])
+            self.assertIn("x: 360 -> 660", result["text"])
+            self.assertIn("YES", result["text"])
+
+            # Stalling input never passes the failure x.
+            result = session.try_actions(20, "DOWN", 30)
+            self.assertFalse(result["passed_failure_x"])
+
+    def test_try_actions_caps_hold_frames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp)
+
+            result = session.try_actions(20, "RIGHT", 10_000)
+
+            self.assertTrue(result["ok"])
+            self.assertIn(f"for {TRY_ACTIONS_MAX_FRAMES} frames", result["text"])
+
+    def test_failed_step_returns_error_and_recovers_on_next_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp, env=FakeSavestateEnv())
+            env.step_error = RuntimeError("emulator crashed")
+
+            result = session.try_actions(20, "RIGHT", 30)
+            self.assertFalse(result["ok"])
+            self.assertIn("emulator crashed", result["text"])
+            self.assertTrue(env.closed)  # broken env was dropped
+
+            # The session lazily rebuilds an env; with our factory returning the
+            # same object, clear the fault and confirm the next call works.
+            env.step_error = None
+            env.closed = False
+            result = session.view_frame(20)
+            self.assertTrue(result["ok"])
+
+    def test_view_frame_with_empty_window_is_safe(self):
+        session = DiagnosisSession({"snapshots": [], "failure": {}}, env_factory=FakeSavestateEnv)
+        result = session.view_frame(60)
+        self.assertFalse(result["ok"])
+
+
+if __name__ == "__main__":
+    unittest.main()
