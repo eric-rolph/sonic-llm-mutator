@@ -50,6 +50,35 @@ class FakeModule:
         return self.env
 
 
+class FakeEmulator:
+    def __init__(self):
+        self.state = b"live-state"
+
+    def get_state(self):
+        return self.state
+
+    def set_state(self, state_bytes):
+        self.state = state_bytes
+
+    def get_screen(self):
+        return f"screen-for-{self.state.decode('ascii')}"
+
+
+class FakeData:
+    def __init__(self, variables):
+        self.variables = variables
+
+    def lookup_all(self):
+        return dict(self.variables)
+
+
+class FakeSavestateEnv(FakeGymnasiumEnv):
+    def __init__(self):
+        super().__init__()
+        self.em = FakeEmulator()
+        self.data = FakeData({"x": 1500, "y": 320, "rings": 7, "lives": 3})
+
+
 class SonicEnvBackendTests(unittest.TestCase):
     def test_normalize_reset_result_supports_legacy_and_gymnasium(self):
         self.assertEqual(normalize_reset_result("obs"), ("obs", {}))
@@ -155,6 +184,46 @@ class SonicEnvBackendTests(unittest.TestCase):
         self.assertEqual(reward, 2.0)
         self.assertTrue(done)
         self.assertEqual(info["x"], 30)
+
+    def make_savestate_wrapper(self):
+        return SonicEnvWrapper(
+            state="GreenHillZone.Act1",
+            backend="stable",
+            retro_module=FakeModule(FakeSavestateEnv()),
+        )
+
+    def test_save_emulator_state_returns_raw_savestate(self):
+        wrapper = self.make_savestate_wrapper()
+
+        self.assertEqual(wrapper.save_emulator_state(), b"live-state")
+
+    def test_load_emulator_state_refreshes_obs_info_and_rebaselines_velocity(self):
+        wrapper = self.make_savestate_wrapper()
+
+        obs = wrapper.load_emulator_state(b"snapshot-42")
+
+        self.assertEqual(obs, "screen-for-snapshot-42")
+        self.assertEqual(wrapper.obs, "screen-for-snapshot-42")
+        self.assertEqual(wrapper.info["x"], 1500)
+        state = wrapper.get_state()
+        self.assertEqual(state["x_pos"], 1500)
+        self.assertEqual(state["y_pos"], 320)
+        self.assertEqual(state["rings"], 7)
+        # The first state after a seek must not report a velocity computed
+        # against wherever the emulator was before the load.
+        self.assertEqual(state["x_velocity"], 0)
+        self.assertEqual(state["y_velocity"], 0)
+
+    def test_savestate_api_raises_clearly_without_emulator_handle(self):
+        module = FakeModule(FakeGymnasiumEnv())  # no .em on this fake
+        wrapper = SonicEnvWrapper(
+            state="GreenHillZone.Act1",
+            backend="stable",
+            retro_module=module,
+        )
+
+        with self.assertRaises(RuntimeError):
+            wrapper.save_emulator_state()
 
 
 if __name__ == "__main__":

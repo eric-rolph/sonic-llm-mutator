@@ -11,6 +11,7 @@ from main import (
     choose_generation_archive_path,
     derive_resume_state,
     evaluate_working_baseline,
+    persist_frontier_window,
     preserve_frontier_screenshot,
     render_candidate_video,
     resolve_end_generation,
@@ -120,6 +121,55 @@ class RunResumeTests(unittest.TestCase):
         self.assertTrue(recorded)
         self.assertEqual(archive.calls[0][1]["fitness"], 47977.37)
         self.assertEqual(archive.calls[0][1]["components"]["levels_cleared"], 1)
+
+    def test_baseline_forwards_snapshot_sink_to_evaluation(self):
+        class RecordingSink:
+            def __init__(self):
+                self.calls = 0
+
+            def record(self, env, frame, state):
+                self.calls += 1
+
+        states = [{"x_pos": 100, "y_pos": 100, "rings": 0, "score": 0}] * 700
+        env = FakeEnv(states)
+        sink = RecordingSink()
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = self.write_policy(tmp, "def get_action(state):\n    return 'RIGHT'\n")
+
+            evaluate_working_baseline(
+                env, policy_path, NoVisionMutator(), max_frames=700, verbose=False, snapshot_sink=sink
+            )
+
+        self.assertGreater(sink.calls, 0)
+
+    def test_persist_frontier_window_never_raises(self):
+        self.assertIsNone(persist_frontier_window(None, "stuck"))
+
+        class ExplodingRing:
+            def persist(self, failure_reason=""):
+                raise RuntimeError("disk full")
+
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        with redirect_stdout(StringIO()):
+            self.assertIsNone(persist_frontier_window(ExplodingRing(), "stuck"))
+
+    def test_persist_frontier_window_writes_a_loadable_window(self):
+        from core.diagnosis import FailureSnapshotRing, load_failure_window
+
+        class SavestateEnv:
+            def save_emulator_state(self):
+                return b"state-bytes"
+
+        ring = FailureSnapshotRing(interval=1, capacity=3)
+        ring.record(SavestateEnv(), 0, {"x_pos": 10, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3})
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = persist_frontier_window(ring, "Sonic got stuck", directory=tmp)
+            window = load_failure_window(directory)
+
+        self.assertEqual(window["failure_reason"], "Sonic got stuck")
+        self.assertEqual(len(window["snapshots"]), 1)
 
     def test_stagnation_escape_preserves_working_policy_context(self):
         trace = [{"zone": 0, "act": 1, "x": 1077}]

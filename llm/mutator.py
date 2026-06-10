@@ -189,6 +189,86 @@ def normalize_vision_context(content):
     return normalized or "UNKNOWN"
 
 
+# --- Agentic failure diagnosis -------------------------------------------
+# Hard ceiling on model-initiated emulator operations per diagnosis.
+DIAGNOSIS_MAX_TOOL_CALLS = 6
+
+DIAGNOSIS_SYSTEM_PROMPT = """You are a game-physics failure analyst with interactive control of a Sega Genesis emulator, paused around the moment a Sonic policy failed.
+Use the tools to find out WHY the failure happened and WHAT INPUT avoids it:
+- view_frame: look at the situation N frames before the failure.
+- try_actions: actually run a counterfactual experiment (e.g. "would holding RIGHT,B from 120 frames earlier clear the obstacle?"). A VERIFIED working input is the most valuable possible finding -- prefer experiments over speculation.
+You have a small tool budget; be economical. When confident, call finish_diagnosis with a concise report covering:
+1. What the obstacle/hazard actually is (from the screenshots).
+2. The earliest state cue that predicts it (x range, velocity pattern, vision context).
+3. Which input sequences you VERIFIED work or fail, with their measured outcomes.
+4. A concrete recommendation for the policy code."""
+
+DIAGNOSIS_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "view_frame",
+            "description": (
+                "Load the emulator savestate nearest to N frames before the failure and look at it. "
+                "Returns the authoritative game state and a screenshot."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frames_before_failure": {
+                        "type": "integer",
+                        "description": "Frames before the failure moment to view (0 = the failure itself, 60 = one second earlier).",
+                    }
+                },
+                "required": ["frames_before_failure"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "try_actions",
+            "description": (
+                "Counterfactual experiment: rewind to N frames before the failure, hold a button "
+                "combination, and report what actually happens (movement, rings, lives, whether Sonic "
+                "progressed past the failure point) plus an end screenshot."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frames_before_failure": {"type": "integer"},
+                    "actions": {
+                        "type": "string",
+                        "description": "Comma-separated buttons to hold, e.g. 'RIGHT,B'. Valid: B, A, MODE, START, UP, DOWN, LEFT, RIGHT, C, Y, X, Z.",
+                    },
+                    "hold_frames": {
+                        "type": "integer",
+                        "description": "How many frames to hold the input (max 300, ~5 seconds).",
+                    },
+                },
+                "required": ["frames_before_failure", "actions", "hold_frames"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish_diagnosis",
+            "description": "End the investigation and submit the final diagnosis report.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "report": {
+                        "type": "string",
+                        "description": "The diagnosis: obstacle identity, predictive state cue, verified inputs, recommendation.",
+                    }
+                },
+                "required": ["report"],
+            },
+        },
+    },
+]
+
 VISION_SCREEN_BUCKET = 250
 
 
@@ -410,6 +490,145 @@ def get_action(state):
 
         return content, "Local inference completed."
 
+    def _image_user_message(self, text, image_path):
+        return {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": self._image_data_url(image_path)}},
+            ],
+        }
+
+    def _dispatch_diagnosis_tool(self, session, name, args):
+        if name == "view_frame":
+            return session.view_frame(args.get("frames_before_failure", 0))
+        if name == "try_actions":
+            return session.try_actions(
+                args.get("frames_before_failure", 0),
+                str(args.get("actions", "")),
+                args.get("hold_frames", 60),
+            )
+        return {"ok": False, "text": f"Unknown tool: {name}", "screenshot": None}
+
+    def diagnose_failure(self, session, failure_reason, coordinate_trace=None, max_tool_calls=DIAGNOSIS_MAX_TOOL_CALLS):
+        """Interactively replay a failure with the vision model driving tools.
+
+        Returns ``{"report": str, "evidence_screenshot": path-or-None}`` or
+        ``None`` on any problem -- the caller falls back to the static-montage
+        mutation path, so diagnosis can never take down training.
+        """
+        if not self.macro_client:
+            return None
+        try:
+            return self._run_diagnosis_loop(session, failure_reason, coordinate_trace, max_tool_calls)
+        except Exception as e:
+            print(f"Agentic diagnosis failed: {e}")
+            return None
+
+    def _run_diagnosis_loop(self, session, failure_reason, coordinate_trace, max_tool_calls):
+        recent_trace = json.dumps(list(coordinate_trace or [])[-5:])
+        intro = (
+            f"A Sonic policy just failed: {failure_reason}\n"
+            f"Recent frame trace: {recent_trace}\n\n"
+            f"{session.describe_window()}\n\n"
+            "Investigate with the tools (prefer try_actions experiments over speculation), "
+            "then call finish_diagnosis with your report."
+        )
+        messages = [
+            {"role": "system", "content": DIAGNOSIS_SYSTEM_PROMPT},
+            {"role": "user", "content": intro},
+        ]
+
+        # Show the failure moment up front; does not count against the budget.
+        initial_view = session.view_frame(0)
+        if initial_view.get("ok") and initial_view.get("screenshot"):
+            messages.append(
+                self._image_user_message(
+                    f"The failure moment itself: {initial_view['text']}",
+                    initial_view["screenshot"],
+                )
+            )
+
+        tool_calls_used = 0
+        while True:
+            force_finish = tool_calls_used >= max_tool_calls
+            request = {
+                "model": self.macro_model,
+                "messages": messages,
+                "temperature": 0.3,
+                "max_tokens": 2048,
+                "timeout": 120,
+            }
+            if not force_finish:
+                request["tools"] = DIAGNOSIS_TOOLS
+            else:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Tool budget exhausted. Write your final diagnosis report now.",
+                    }
+                )
+            response = self.macro_client.chat.completions.create(**request)
+            message = response.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None) or []
+
+            if force_finish or not tool_calls:
+                report = message_text(message)
+                if not report:
+                    raise ValueError("Diagnosis model returned an empty report.")
+                return {"report": report, "evidence_screenshot": session.last_screenshot}
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": message.content or None,
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.function.name,
+                                "arguments": call.function.arguments,
+                            },
+                        }
+                        for call in tool_calls
+                    ],
+                }
+            )
+
+            image_followups = []
+            for call in tool_calls:
+                tool_calls_used += 1
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                except ValueError:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+
+                if call.function.name == "finish_diagnosis":
+                    report = str(args.get("report", "")).strip() or message_text(message)
+                    if not report:
+                        raise ValueError("finish_diagnosis was called without a report.")
+                    return {"report": report, "evidence_screenshot": session.last_screenshot}
+
+                result = self._dispatch_diagnosis_tool(session, call.function.name, args)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": str(result.get("text", "")),
+                    }
+                )
+                if result.get("screenshot"):
+                    image_followups.append(
+                        self._image_user_message(
+                            f"Screenshot from your {call.function.name} call:",
+                            result["screenshot"],
+                        )
+                    )
+            messages.extend(image_followups)
+
     def extract_lesson(self, failure_reason, coordinate_trace):
         prompt = f"""
 We failed with the following reason: {failure_reason}
@@ -576,8 +795,15 @@ Return ONLY valid Python code containing the updated skill library (the existing
             except Exception as e:
                 print(f"Failed to save extracted skills: {e}")
 
-    def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None):
+    def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None, diagnosis_report=None):
         history_text = json.dumps(recent_history, indent=2)
+        diagnosis_text = ""
+        if diagnosis_report:
+            diagnosis_text = (
+                "Agentic Failure Diagnosis (a vision model interactively replayed this failure on the "
+                "emulator and ran counterfactual input experiments; trust its VERIFIED findings over "
+                "guesses from the screenshot):\n" + str(diagnosis_report)
+            )
         trace_text = ""
         current_x = 0
         current_zone, current_act = None, None
@@ -623,6 +849,8 @@ Here is the current code that failed:
 
 Primary Failure Reason (the working policy's own frontier): {failure_reason}
 {trace_text}
+
+{diagnosis_text}
 
 Recent History of Other Evaluated Candidates (background only; these failures
 may not apply to the current code):

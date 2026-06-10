@@ -289,6 +289,39 @@ class MutatorMemoryTests(unittest.TestCase):
         self.assertIn("Other Evaluated Candidates", mutator.prompt)
         self.assertIn("may not apply to the current code", mutator.prompt)
 
+    def test_mutate_policy_embeds_diagnosis_report_when_provided(self):
+        class RecordingMutator(MutatorClient):
+            def __init__(self):
+                self.prompt = ""
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                self.prompt = prompt
+                return "def get_action(state):\n    return 'RIGHT'", "micro"
+
+        mutator = RecordingMutator()
+        with redirect_stdout(StringIO()):
+            mutator.mutate_policy(
+                current_code="def get_action(state):\n    return 'RIGHT'",
+                failure_reason="Policy code timeout",
+                screenshot_path=None,
+                recent_history=[],
+                diagnosis_report="VERIFIED: RIGHT,B held for 40 frames clears the wall at x=3061.",
+            )
+
+        self.assertIn("Agentic Failure Diagnosis", mutator.prompt)
+        self.assertIn("VERIFIED: RIGHT,B held for 40 frames", mutator.prompt)
+
+        # Without a report the section is absent entirely.
+        mutator = RecordingMutator()
+        with redirect_stdout(StringIO()):
+            mutator.mutate_policy(
+                current_code="def get_action(state):\n    return 'RIGHT'",
+                failure_reason="Policy code timeout",
+                screenshot_path=None,
+                recent_history=[],
+            )
+        self.assertNotIn("Agentic Failure Diagnosis", mutator.prompt)
+
     def test_mutate_policy_routes_visual_failures_to_vision_and_code_faults_to_micro(self):
         class RecordingMutator(MutatorClient):
             def __init__(self):
