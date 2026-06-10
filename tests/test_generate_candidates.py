@@ -12,9 +12,11 @@ class FakeMutator:
         self.mutate_calls = 0
         self.crossover_calls = 0
         self.parent_pairs = []
+        self.diagnosis_reports = []
 
-    def mutate_policy(self, code, reason, screenshot, history, temperature, trace):
+    def mutate_policy(self, code, reason, screenshot, history, temperature, trace, diagnosis_report=None):
         self.mutate_calls += 1
+        self.diagnosis_reports.append(diagnosis_report)
         return f"# mutation t={temperature}", "mutated"
 
     def crossover_policies(self, parent_a, parent_b, history, temperature=0.7):
@@ -166,6 +168,28 @@ class GenerateCandidatesTests(unittest.TestCase):
 
         self.assertEqual(selector_calls, [True])
         self.assertEqual(mutator.parent_pairs, [("# archived parent a", "# archived parent b")])
+
+    def test_diagnosis_report_is_forwarded_to_mutations(self):
+        mutator = FakeMutator()
+
+        generate_silently(
+            mutator,
+            "def get_action(state):\n    return 'RIGHT'\n",
+            "stuck",
+            None,
+            [],
+            [],
+            2,
+            [],
+            crossover_probability=0.0,
+            diagnosis_report="The wall at x=3061 needs a full jump; RIGHT,B for 40 frames verified.",
+        )
+
+        self.assertEqual(mutator.mutate_calls, 2)
+        self.assertEqual(
+            mutator.diagnosis_reports,
+            ["The wall at x=3061 needs a full jump; RIGHT,B for 40 frames verified."] * 2,
+        )
 
     def test_failed_request_falls_back_to_working_policy(self):
         result = generate_silently(

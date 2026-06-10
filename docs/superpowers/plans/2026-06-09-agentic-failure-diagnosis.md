@@ -71,9 +71,9 @@
 - Modify: `llm/mutator.py`
 - Create: `tests/test_diagnoser.py`
 
-- [ ] Tool schemas (`view_frame`, `try_actions`, `finish_diagnosis`) and `diagnose_failure(session, failure_reason, trace)` driving `macro_client` chat completions with `tools=`; text tool results + screenshots as follow-up user image messages; max 6 tool rounds then a forced no-tools final report; returns `(report, evidence_screenshot)` or `None` on any error.
-- [ ] Tests with a scripted fake OpenAI client: multi-round tool dispatch, message assembly (tool result + image follow-up), forced finish on budget exhaustion, `None` on client error, no macro client → `None` without calls.
-- [ ] Run `.\venv38\Scripts\python.exe -m unittest tests.test_diagnoser -v`.
+- [x] Tool schemas (`view_frame`, `try_actions`, `finish_diagnosis`) and `diagnose_failure(session, failure_reason, trace)` driving `macro_client` chat completions with `tools=`; text tool results + screenshots as follow-up user image messages; max 6 tool rounds then a forced no-tools final report; returns `(report, evidence_screenshot)` or `None` on any error.
+- [x] Tests with a scripted fake OpenAI client: multi-round tool dispatch, message assembly (tool result + image follow-up), forced finish on budget exhaustion, `None` on client error, no macro client → `None` without calls.
+- [x] Run `.\venv38\Scripts\python.exe -m unittest tests.test_diagnoser -v`.
 
 ### Task 6: Wire diagnosis into mutation
 
@@ -83,11 +83,11 @@
 - Modify: `tests/test_mutator_memory.py`
 - Modify: `tests/test_generate_candidates.py`
 
-- [ ] `mutate_policy(..., diagnosis_report=None)` embeds the report in the prompt under an "Agentic Failure Diagnosis" section.
-- [ ] `generate_candidates(..., diagnosis_report=None)` forwards it to mutations (not crossovers).
-- [ ] `maybe_diagnose_frontier(mutator, session_cache, frontier)` in `main.py`: gates on `SONIC_AGENTIC_DIAGNOSIS`, visual failure, persisted window, macro client; caches `(window key → report)` so an unchanged frontier is diagnosed once; evidence screenshot preferred over the montage for the mutation call.
-- [ ] Tests: report lands in the prompt; gating and caching logic; diagnosis errors fall back silently.
-- [ ] Run `.\venv38\Scripts\python.exe -m unittest tests.test_mutator_memory tests.test_generate_candidates tests.test_run_resume -v`.
+- [x] `mutate_policy(..., diagnosis_report=None)` embeds the report in the prompt under an "Agentic Failure Diagnosis" section.
+- [x] `generate_candidates(..., diagnosis_report=None)` forwards it to mutations (not crossovers).
+- [x] `maybe_diagnose_frontier(mutator, session_cache, frontier)` in `main.py`: gates on `SONIC_AGENTIC_DIAGNOSIS`, visual failure, persisted window, macro client; caches `(window key → report)` so an unchanged frontier is diagnosed once; evidence screenshot preferred over the montage for the mutation call.
+- [x] Tests: report lands in the prompt; gating and caching logic; diagnosis errors fall back silently.
+- [x] Run `.\venv38\Scripts\python.exe -m unittest tests.test_mutator_memory tests.test_generate_candidates tests.test_run_resume -v`.
 
 ### Task 7: MCP sidecar parity
 

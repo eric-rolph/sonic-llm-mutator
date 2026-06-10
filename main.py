@@ -18,7 +18,12 @@ import sys
 
 sys.path.insert(0, os.path.abspath("."))
 
-from core.diagnosis import FailureSnapshotRing
+from core.diagnosis import (
+    DiagnosisSession,
+    FailureSnapshotRing,
+    load_failure_window,
+    window_key,
+)
 from core.evaluation import build_policy_load_failure, evaluate_policy
 from core.frontier import (
     build_frontier_guard_candidate,
@@ -109,6 +114,62 @@ def build_stagnation_escape_context(working_fitness, last_trace, last_screenshot
 def select_working_frontier_context(current_context, candidate_context, promoted):
     """Keep mutation feedback aligned with the code that will be mutated next."""
     return dict(candidate_context if promoted else current_context)
+
+
+def diagnosable_failure(failure_reason):
+    """Only real visual frontiers get agentic diagnosis.
+
+    Timeouts are code bugs (local model territory) and the stagnation-escape
+    pseudo-failure intentionally asks for a *different* strategy, so replaying
+    the old frontier would anchor the model right back to it.
+    """
+    reason = str(failure_reason or "").lower()
+    if "timeout" in reason:
+        return False
+    return "stuck" in reason or "fatal" in reason or "lost a life" in reason
+
+
+def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, session_factory=None):
+    """Run agentic diagnosis on the frontier once; reuse while it is unchanged.
+
+    Returns ``{"report", "evidence_screenshot"}`` or ``None``. The cache also
+    remembers failed attempts so a broken diagnosis setup is not retried every
+    generation until the frontier actually changes.
+    """
+    if not emulator_available or os.environ.get("SONIC_AGENTIC_DIAGNOSIS", "1") == "0":
+        return None
+    window_dir = frontier.get("window")
+    if not window_dir or not diagnosable_failure(frontier.get("failure_reason")):
+        return None
+    window = load_failure_window(window_dir)
+    if window is None:
+        return None
+
+    key = window_key(window)
+    if cache.get("key") == key:
+        return cache.get("result")
+
+    session = None
+    try:
+        build_session = session_factory or DiagnosisSession
+        session = build_session(window)
+        print("Running agentic failure diagnosis on the working frontier...")
+        result = mutator.diagnose_failure(session, frontier.get("failure_reason"), frontier.get("trace"))
+        if result:
+            print("Diagnosis complete.")
+    except Exception as e:
+        print(f"Diagnosis skipped: {e}")
+        result = None
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    cache["key"] = key
+    cache["result"] = result
+    return result
 
 
 def persist_frontier_window(ring, failure_reason, directory=None):
@@ -233,6 +294,7 @@ def generate_candidates(
     pool_codes,
     crossover_probability=0.30,
     parent_selector=None,
+    diagnosis_report=None,
 ):
     """Request ``n_candidates`` new policies from the mutator.
 
@@ -290,6 +352,7 @@ def generate_candidates(
                     recent_history,
                     temperature,
                     last_trace,
+                    diagnosis_report,
                 )
             futures[future] = c
 
@@ -455,6 +518,7 @@ def run_evaluation_loop(
     }
     seed_population_baseline(population, working_path, baseline_context)
 
+    diagnosis_cache = {}
     end_gen = resolve_end_generation(start_gen, max_generations, generations)
     for gen in range(start_gen, end_gen + 1):
         print(f"\n--- Generation {gen} ---")
@@ -494,6 +558,14 @@ def run_evaluation_loop(
         best_candidate_ring = None
         attempted_frontier_markers = set()
 
+        # Diagnose the frontier once per generation (cached while unchanged):
+        # the vision model replays the failure and experiments with inputs.
+        diagnosis = maybe_diagnose_frontier(
+            mutator, mutation_frontier, diagnosis_cache, emulator_available=env is not None
+        )
+        diagnosis_report = diagnosis.get("report") if diagnosis else None
+        evidence_screenshot = diagnosis.get("evidence_screenshot") if diagnosis else None
+
         # Generate candidates
         recent_history = history.get_recent_history(3)
         pool_codes = load_pool_codes()
@@ -501,12 +573,13 @@ def run_evaluation_loop(
             mutator,
             working_code,
             mutation_frontier["failure_reason"],
-            mutation_frontier["screenshot"],
+            evidence_screenshot or mutation_frontier["screenshot"],
             recent_history,
             mutation_frontier["trace"],
             n_candidates,
             pool_codes,
             parent_selector=population.select_parent_codes,
+            diagnosis_report=diagnosis_report,
         )
 
         # Evaluate candidates
