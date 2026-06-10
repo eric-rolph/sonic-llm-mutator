@@ -107,4 +107,4 @@
 - [x] README: replace "planned next step" wording with the shipped behavior (diagnosis flow, config flag, MCP parity); add `SONIC_AGENTIC_DIAGNOSIS` to `.env.example`.
 - [x] Run `.\venv38\Scripts\python.exe -m unittest discover -s tests` (221 tests OK).
 - [x] Run `.\venv38\Scripts\python.exe -m ruff check .` (clean).
-- [ ] Push branch, open PR, watch CI (including the real-emulator savestate smoke), merge when green.
+- [x] Push branch, open PR, watch CI (including the real-emulator savestate smoke), merge when green. (PR #9, all checks passed, merged as a5a84d6.)
