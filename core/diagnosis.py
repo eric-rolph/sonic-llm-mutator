@@ -49,7 +49,12 @@ class FailureSnapshotRing:
         self.capacity = max(1, int(capacity))
         self.snapshots = []
         self.last_seen = None  # (frame, info) of the newest state offered
-        self.max_x_seen = 0   # the run's true frontier, not its final resting x
+        # The run's true frontier WITHIN THE CURRENT ACT. x resets to ~0 every
+        # act, so carrying a max across a transition judges Act-2 experiments
+        # against Act-1 distances (live-observed: a real escape to x=3418 was
+        # called a failure against a phantom frontier of 9767).
+        self.max_x_seen = 0
+        self._max_x_zone_act = None
         self._last_frame = None
         self.disabled = False
 
@@ -63,8 +68,13 @@ class FailureSnapshotRing:
         """
         if self.disabled:
             return False
-        self.last_seen = (int(frame), _info_subset(state))
-        self.max_x_seen = max(self.max_x_seen, self.last_seen[1]["x_pos"])
+        info = _info_subset(state)
+        zone_act = (info["zone"], info["act"])
+        if self._max_x_zone_act != zone_act:
+            self._max_x_zone_act = zone_act
+            self.max_x_seen = 0
+        self.last_seen = (int(frame), info)
+        self.max_x_seen = max(self.max_x_seen, info["x_pos"])
         if self._last_frame is not None and frame - self._last_frame < self.interval:
             return False
         try:

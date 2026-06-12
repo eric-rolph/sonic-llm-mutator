@@ -80,6 +80,25 @@ class FailureSnapshotRingTests(unittest.TestCase):
         self.assertFalse(ring.record(env, 100, env.get_state()))
         self.assertEqual(ring.snapshots, [])
 
+    def test_frontier_x_resets_on_act_transition(self):
+        # Live-observed bug: the baseline cleared Act 1 at x~9767, then failed
+        # in Act 2 at x~2478 — and real Act-2 escapes (x=3418) were judged
+        # against the phantom Act-1 frontier. The frontier must be per-act.
+        env = FakeSavestateEnv()
+        ring = FailureSnapshotRing(interval=60, capacity=10)
+
+        ring.record(env, 0, {"x_pos": 9000, "y_pos": 1, "zone": 0, "act": 0, "rings": 0, "lives": 3})
+        ring.record(env, 60, {"x_pos": 9767, "y_pos": 1, "zone": 0, "act": 0, "rings": 0, "lives": 3})
+        ring.record(env, 120, {"x_pos": 100, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3})
+        ring.record(env, 180, {"x_pos": 2478, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3})
+        ring.record(env, 240, {"x_pos": 2191, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ring.persist(tmp, failure_reason="stuck", failure_frame=240)
+            window = load_failure_window(tmp)
+
+        self.assertEqual(window["failure"]["frontier_x"], 2478)
+
     def test_persist_and_load_round_trip(self):
         env = FakeSavestateEnv()
         ring = self.fill_ring(env, [0, 60, 120])
