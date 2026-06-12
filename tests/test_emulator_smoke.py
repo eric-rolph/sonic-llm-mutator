@@ -87,6 +87,54 @@ class EmulatorSmokeTests(unittest.TestCase):
         finally:
             env.close()
 
+    def test_diagnosis_env_coexists_with_training_env(self):
+        # The bug live testing caught: retro allows ONE emulator instance per
+        # process, so an in-process diagnosis env can never start while the
+        # training env exists. The child-process proxy must coexist, accept a
+        # savestate captured by the training env, and run experiments on it.
+        import tempfile
+
+        from core.diagnosis import ProcessDiagnosisEnv
+        from emulator.sonic_env import SonicEnvWrapper
+
+        training_env = SonicEnvWrapper(game="Airstriker-Genesis", state="Level1", record_path=None)
+        try:
+            for _ in range(5):
+                training_env.step(action_string_to_array("B"))
+            saved = training_env.save_emulator_state()
+            state_at_save = training_env.get_state()
+
+            diagnosis_env = ProcessDiagnosisEnv(
+                factory_spec="tests.test_emulator_smoke:make_airstriker_env"
+            )
+            try:
+                diagnosis_env.load_emulator_state(saved)
+                restored = diagnosis_env.get_state()
+                for key in ("x_pos", "y_pos", "rings", "lives", "score"):
+                    self.assertEqual(state_at_save[key], restored[key], key)
+
+                obs, reward, done, info = diagnosis_env.step(action_string_to_array("B"))
+                self.assertIsNone(obs)  # frame stripped at the process boundary
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    shot = os.path.join(tmp, "diag.png")
+                    self.assertEqual(diagnosis_env.get_screenshot(shot), shot)
+                    self.assertGreater(os.path.getsize(shot), 0)
+            finally:
+                diagnosis_env.close()
+
+            # The training env is still healthy after the child ran alongside.
+            training_env.step(action_string_to_array("B"))
+        finally:
+            training_env.close()
+
+
+def make_airstriker_env():
+    """Child-process factory for the coexistence test (must be importable)."""
+    from emulator.sonic_env import SonicEnvWrapper
+
+    return SonicEnvWrapper(game="Airstriker-Genesis", state="Level1", record_path=None)
+
 
 if __name__ == "__main__":
     unittest.main()

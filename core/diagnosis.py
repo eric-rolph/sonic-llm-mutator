@@ -9,8 +9,11 @@ authoritative state, take screenshots, and run counterfactual inputs — on a
 dedicated non-recording env so experiments never pollute training recordings.
 """
 
+import importlib
 import json
+import multiprocessing
 import os
+import queue
 import time
 
 from core.actions import action_string_to_array
@@ -152,10 +155,123 @@ def window_key(window):
     return f"{window.get('directory', '')}:{window.get('created_at', 0)}:{window.get('failure_reason', '')}"
 
 
-def _default_env_factory():
+def _default_child_env():
+    """The real emulator the diagnosis worker process hosts."""
     from emulator.sonic_env import SonicEnvWrapper
 
     return SonicEnvWrapper(record_path=None)
+
+
+def _import_callable(spec):
+    module_name, _, attribute = spec.partition(":")
+    module = importlib.import_module(module_name)
+    return getattr(module, attribute)
+
+
+def _diagnosis_env_worker(factory_spec, request_queue, response_queue):
+    try:
+        env = _import_callable(factory_spec)()
+    except Exception as e:  # noqa: BLE001 - surfaced to the parent
+        response_queue.put(("error", f"{type(e).__name__}: {e}"))
+        return
+    response_queue.put(("ready", None))
+    while True:
+        request = request_queue.get()
+        if request is None:
+            break
+        method, args, kwargs = request
+        try:
+            result = getattr(env, method)(*args, **kwargs)
+            if method == "step":
+                # The observation frame is heavy to pickle and diagnosis only
+                # reads RAM state plus screenshots the child writes to disk.
+                result = (None,) + tuple(result[1:])
+            response_queue.put(("ok", result))
+        except Exception as e:  # noqa: BLE001 - surfaced to the parent
+            response_queue.put(("error", f"{type(e).__name__}: {e}"))
+    try:
+        env.close()
+    except Exception:
+        pass
+
+
+class ProcessDiagnosisEnv:
+    """Hosts the diagnosis emulator in a child process and proxies calls.
+
+    gym-retro (and stable-retro) allow only **one emulator instance per
+    process**, and the training env already occupies the training process —
+    creating a second in-process env raises RuntimeError, which is exactly
+    what broke every diagnosis tool in live testing. A spawned child process
+    gets its own instance; the proxy forwards the few methods
+    :class:`DiagnosisSession` needs over queues (the same pattern
+    ``core.policy_runner`` uses for policy isolation).
+    """
+
+    DEFAULT_FACTORY_SPEC = "core.diagnosis:_default_child_env"
+
+    def __init__(self, factory_spec=DEFAULT_FACTORY_SPEC, start_timeout=90.0, call_timeout=60.0):
+        self._call_timeout = call_timeout
+        context = multiprocessing.get_context("spawn")
+        self._requests = context.Queue()
+        self._responses = context.Queue()
+        self._process = context.Process(
+            target=_diagnosis_env_worker,
+            args=(factory_spec, self._requests, self._responses),
+            name="diagnosis-env",
+            daemon=True,
+        )
+        self._process.start()
+        try:
+            status, payload = self._responses.get(timeout=start_timeout)
+        except queue.Empty:
+            self._terminate()
+            raise RuntimeError("Diagnosis env worker did not start in time.")
+        if status != "ready":
+            self._terminate()
+            raise RuntimeError(f"Diagnosis env worker failed to start: {payload}")
+
+    def _call(self, method, *args, **kwargs):
+        self._requests.put((method, args, kwargs))
+        try:
+            status, payload = self._responses.get(timeout=self._call_timeout)
+        except queue.Empty:
+            self._terminate()
+            raise RuntimeError(f"Diagnosis env call timed out: {method}")
+        if status == "error":
+            raise RuntimeError(payload)
+        return payload
+
+    def load_emulator_state(self, state_bytes):
+        return self._call("load_emulator_state", state_bytes)
+
+    def get_state(self):
+        return self._call("get_state")
+
+    def step(self, action):
+        return self._call("step", action)
+
+    def get_screenshot(self, filepath=None):
+        if filepath is None:
+            return self._call("get_screenshot")
+        return self._call("get_screenshot", filepath)
+
+    def _terminate(self):
+        if self._process is not None and self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=2.0)
+
+    def close(self):
+        try:
+            self._requests.put_nowait(None)
+        except Exception:
+            pass
+        if self._process is not None:
+            self._process.join(timeout=2.0)
+        self._terminate()
+
+
+def _default_env_factory():
+    return ProcessDiagnosisEnv()
 
 
 class DiagnosisSession:
