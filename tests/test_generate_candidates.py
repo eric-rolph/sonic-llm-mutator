@@ -205,15 +205,45 @@ class GenerateCandidatesTests(unittest.TestCase):
             )
         )
 
-    def test_build_diagnosis_guard_does_not_shadow_overlapping_guard(self):
+    def test_new_verified_escape_replaces_overlapping_guard(self):
+        # Live-observed freeze: the promoted champion carried an x-threshold
+        # guard at x=2404, and its own better frame-replay replacement at
+        # x=2393 was blocked by the overlap check. Newer verified escapes at
+        # the same spot must supersede the old guard, not be blocked by it.
         working = """def get_action(state):
     # DIAGNOSIS_GUARD zone=0 act=1 x=2400
-    if 2375 <= state.get("x_pos", 0) < 2500:
+    if (
+        state.get("zone") == 0
+        and state.get("act") == 1
+        and 2375 <= state.get("x_pos", 0) < 2500
+    ):
         return "RIGHT,B"
+
     return "RIGHT"
 """
         experiment = {
-            "zone": 0, "act": 1, "start_x": 2410, "max_x": 2600, "actions": "RIGHT,B",
+            "zone": 0, "act": 1, "start_x": 2410, "max_x": 2600, "actions": "DOWN,B",
+        }
+
+        candidate = build_diagnosis_guard_candidate(working, experiment)
+
+        self.assertIsNotNone(candidate)
+        self.assertIn("# DIAGNOSIS_GUARD zone=0 act=1 x=2410", candidate)
+        self.assertNotIn("# DIAGNOSIS_GUARD zone=0 act=1 x=2400", candidate)
+        self.assertNotIn("2375 <= state.get", candidate)  # old body gone
+        self.assertIn('return "DOWN,B"', candidate)
+        self.assertIn('return "RIGHT"', candidate)  # original policy intact
+
+    def test_mangled_old_guard_blocks_replacement_conservatively(self):
+        # If a mutation rewrote the old guard block (no trailing blank line in
+        # our generated shape), stripping is unsafe -- keep the old behavior.
+        working = (
+            "def get_action(state):\n"
+            "    # DIAGNOSIS_GUARD zone=0 act=1 x=2400\n"
+            "    return 'RIGHT'\n"  # no blank line: not our generated shape
+        )
+        experiment = {
+            "zone": 0, "act": 1, "start_x": 2410, "max_x": 2600, "actions": "DOWN,B",
         }
         self.assertIsNone(build_diagnosis_guard_candidate(working, experiment))
 
