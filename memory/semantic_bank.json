@@ -138,5 +138,33 @@
         "lesson": "If x_velocity remains near zero while pressing RIGHT, press B to jump over the obstacle.",
         "zone": 0,
         "act": 1
+    },
+    {
+        "x": 562,
+        "hazard": "Flat ground / Momentum loss",
+        "lesson": "Do not use 'RIGHT,DOWN' for general forward movement; use 'RIGHT' to maintain maximum velocity and avoid getting stuck on small terrain lips.",
+        "zone": 0,
+        "act": 0
+    },
+    {
+        "x": 80,
+        "hazard": "Initial terrain obstacle",
+        "lesson": "If x_velocity remains near zero while moving RIGHT at the start of an act, press B to jump over potential low-profile obstacles.",
+        "zone": 0,
+        "act": 1
+    },
+    {
+        "x": 0,
+        "hazard": "Initial level barrier",
+        "lesson": "If forward progress (x_velocity) is stalled while pressing RIGHT at the beginning of a zone/act, incorporate jumps (B) to clear starting obstacles.",
+        "zone": 0,
+        "act": 1
+    },
+    {
+        "x": 80,
+        "hazard": "Initial wall or badnik",
+        "lesson": "When x_velocity is zero while moving right at the start of an act, incorporate jumps ('RIGHT,B') to overcome small obstacles that block momentum.",
+        "zone": 0,
+        "act": 1
     }
 ]

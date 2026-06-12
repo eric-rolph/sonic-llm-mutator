@@ -1,14 +1,36 @@
 def get_action(state):
     # FRONTIER_GUARD zone=0 act=1 x=1077
-    # DIAGNOSIS_GUARD zone=0 act=1 x=2404
+    # DIAGNOSIS_GUARD zone=0 act=1 x=2393
+    # DIAGNOSIS_GUARD zone=0 act=1 x=3928
+    global _DIAG_REPLAY_0_1_3928
+    if '_DIAG_REPLAY_0_1_3928' not in globals():
+        _DIAG_REPLAY_0_1_3928 = -1
     if (
         state.get("zone") == 0
         and state.get("act") == 1
-        and 2379 <= state.get("x_pos", 0) < 3326
+        and _DIAG_REPLAY_0_1_3928 < 340
+        and (_DIAG_REPLAY_0_1_3928 >= 0 or 3903 <= state.get("x_pos", 0) <= 3953)
     ):
-        if state.get("x_pos", 0) >= 2498:
+        _DIAG_REPLAY_0_1_3928 = _DIAG_REPLAY_0_1_3928 + 1
+        if _DIAG_REPLAY_0_1_3928 < 200:
             return "RIGHT"
-        if state.get("x_pos", 0) >= 2453:
+        if _DIAG_REPLAY_0_1_3928 < 240:
+            return "RIGHT,B"
+        return "RIGHT"
+
+    global _DIAG_REPLAY_0_1_2393
+    if '_DIAG_REPLAY_0_1_2393' not in globals():
+        _DIAG_REPLAY_0_1_2393 = -1
+    if (
+        state.get("zone") == 0
+        and state.get("act") == 1
+        and _DIAG_REPLAY_0_1_2393 < 280
+        and (_DIAG_REPLAY_0_1_2393 >= 0 or 2368 <= state.get("x_pos", 0) <= 2418)
+    ):
+        _DIAG_REPLAY_0_1_2393 = _DIAG_REPLAY_0_1_2393 + 1
+        if _DIAG_REPLAY_0_1_2393 < 120:
+            return "RIGHT"
+        if _DIAG_REPLAY_0_1_2393 < 160:
             return "RIGHT,B"
         return "RIGHT"
 

@@ -221,3 +221,30 @@ def semantic_memory_fix_zone0_act1_midsection(state, _STATE):
             return "RIGHT,B"
         return "RIGHT"
     return None
+
+
+def replay_sequence_zone0_act1_3928(state, _STATE):
+    current_x = state.get("x_pos", 0)
+    if state.get("zone") == 0 and state.get("act") == 1:
+        if "replay_3928" not in _STATE:
+            _STATE["replay_3928"] = -1
+        if 3903 <= current_x <= 3953:
+            if _STATE["replay_3928"] < 0 or (3903 <= current_x <= 3953):
+                _STATE["replay_3928"] += 1
+                if _STATE["replay_3928"] < 200: return "RIGHT"
+                if _STATE["replay_3928"] < 240: return "RIGHT,B"
+                if _STATE["replay_3928"] < 340: return "RIGHT"
+    return None
+
+def replay_sequence_zone0_act1_2393(state, _STATE):
+    current_x = state.get("x_pos", 0)
+    if state.get("zone") == 0 and state.get("act") == 1:
+        if "replay_2393" not in _STATE:
+            _STATE["replay_2393"] = -1
+        if 2368 <= current_x <= 2418:
+            if _STATE["replay_2393"] < 0 or (2368 <= current_x <= 2418):
+                _STATE["replay_2393"] += 1
+                if _STATE["replay_2393"] < 120: return "RIGHT"
+                if _STATE["replay_2393"] < 160: return "RIGHT,B"
+                if _STATE["replay_2393"] < 280: return "RIGHT"
+    return None
