@@ -217,7 +217,7 @@ class GenerateCandidatesTests(unittest.TestCase):
         }
         self.assertIsNone(build_diagnosis_guard_candidate(working, experiment))
 
-    def test_build_diagnosis_guard_compiles_sequence_into_x_thresholds(self):
+    def test_build_diagnosis_guard_compiles_sequence_as_frame_replay(self):
         working = "def get_action(state):\n    return 'RIGHT'\n"
         experiment = {
             "zone": 0, "act": 1, "start_x": 2350, "max_x": 2600, "actions": "RIGHT",
@@ -231,25 +231,37 @@ class GenerateCandidatesTests(unittest.TestCase):
         candidate = build_diagnosis_guard_candidate(working, experiment)
 
         self.assertIn("# DIAGNOSIS_GUARD zone=0 act=1 x=2350", candidate)
-        self.assertIn("2325 <= state.get(\"x_pos\", 0) < 2600", candidate)
-        # Threshold dispatch: later segments checked first, base action last.
-        self.assertIn('if state.get("x_pos", 0) >= 2530:', candidate)
-        self.assertIn('if state.get("x_pos", 0) >= 2460:', candidate)
+        # Replay anchors on the first crossing of the start x...
+        self.assertIn("2325 <= state.get(\"x_pos\", 0) <= 2375", candidate)
+        # ...then plays the measured frame counts: jump segment holds B for
+        # its full 40 frames (x-thresholds released it after a few frames,
+        # turning a verified full jump into a short hop).
+        self.assertIn("global _DIAG_REPLAY_0_1_2350", candidate)
+        self.assertIn("if _DIAG_REPLAY_0_1_2350 < 90:", candidate)
+        self.assertIn("if _DIAG_REPLAY_0_1_2350 < 130:", candidate)
         self.assertIn('return "RIGHT,B"', candidate)
-        b_press = candidate.index('>= 2460')
-        landing = candidate.index('>= 2530')
-        self.assertLess(landing, b_press)  # furthest threshold first
+        self.assertIn("_DIAG_REPLAY_0_1_2350 < 190", candidate)  # total budget
+        # The compiled candidate must still load in the restricted runtime.
+        from core.policy_validator import validate_policy_source
+        validate_policy_source(candidate)
 
-    def test_sequence_guard_requires_monotonic_segment_positions(self):
+    def test_sequence_guard_compiles_backward_runups_too(self):
+        # Frame replay does not need x-monotonic boundaries, so back-up-then-
+        # charge sequences (the longer-runway strategy) compile as well.
         working = "def get_action(state):\n    return 'RIGHT'\n"
         experiment = {
             "zone": 0, "act": 1, "start_x": 2400, "max_x": 2600, "actions": "LEFT",
             "segments": [
                 {"actions": "LEFT", "frames": 30, "start_x": 2400},
-                {"actions": "RIGHT,B", "frames": 60, "start_x": 2350},  # went backward
+                {"actions": "RIGHT,B", "frames": 60, "start_x": 2350},
             ],
         }
-        self.assertIsNone(build_diagnosis_guard_candidate(working, experiment))
+
+        candidate = build_diagnosis_guard_candidate(working, experiment)
+
+        self.assertIsNotNone(candidate)
+        self.assertIn('return "LEFT"', candidate)
+        self.assertIn('return "RIGHT,B"', candidate)
 
     def test_verified_experiment_takes_the_deterministic_slot(self):
         mutator = FakeMutator()

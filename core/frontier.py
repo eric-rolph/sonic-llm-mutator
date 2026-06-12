@@ -152,30 +152,45 @@ def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
 
     segments = experiment.get("segments") or []
     if len(segments) >= 2:
-        # Compile a timed sequence into stateless x-threshold dispatch using
-        # the measured segment-boundary positions. Sonic's jump fires on the
-        # B *press*, so returning "RIGHT,B" only within its measured x-band
-        # reproduces "press B at the edge" without any frame counters.
+        # Compile a timed sequence as FRAME REPLAY anchored on the first
+        # crossing of the sequence's start x. The deterministic emulator and
+        # unchanged approach code reproduce the arrival state, so replaying
+        # the measured frame counts is faithful — unlike x-threshold dispatch,
+        # which live testing showed releases B after the few frames it takes
+        # to cross a band, turning the verified full jump into a short hop.
         cleaned = []
-        previous_x = None
         for segment in segments:
             seg_actions = _valid_actions(segment.get("actions") if isinstance(segment, dict) else None)
             try:
-                seg_x = int(segment["start_x"])
+                seg_frames = max(1, int(segment["frames"]))
             except (KeyError, TypeError, ValueError):
                 return None
             if seg_actions is None:
                 return None
-            if previous_x is not None and seg_x <= previous_x:
-                return None  # not x-monotonic; cannot compile statelessly
-            previous_x = seg_x
-            cleaned.append((seg_x, seg_actions))
-        body = []
-        for seg_x, seg_actions in reversed(cleaned[1:]):
-            body.append(f"    if state.get(\"x_pos\", 0) >= {seg_x}:")
+            cleaned.append((seg_frames, seg_actions))
+        total_frames = sum(frames for frames, _ in cleaned)
+
+        counter = f"_DIAG_REPLAY_{zone}_{act}_{start_x}"
+        body = [
+            f"global {counter}",
+            f"if {counter!r} not in globals():",
+            f"    {counter} = -1",
+            "if (",
+            f"    state.get(\"zone\") == {zone!r}",
+            f"    and state.get(\"act\") == {act!r}",
+            f"    and {counter} < {total_frames}",
+            f"    and ({counter} >= 0 or {lower} <= state.get(\"x_pos\", 0) <= {start_x + x_radius})",
+            "):",
+            f"    {counter} = {counter} + 1",
+        ]
+        threshold = 0
+        for seg_frames, seg_actions in cleaned[:-1]:
+            threshold += seg_frames
+            body.append(f"    if {counter} < {threshold}:")
             body.append(f"        return \"{seg_actions}\"")
-        body.append(f"    return \"{cleaned[0][1]}\"")
-        return _insert_guard_lines(working_code, head + body)
+        body.append(f"    return \"{cleaned[-1][1]}\"")
+        guard_lines = [marker] + body
+        return _insert_guard_lines(working_code, guard_lines)
 
     actions = _valid_actions(experiment.get("actions"))
     if actions is None:
