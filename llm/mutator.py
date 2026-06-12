@@ -661,11 +661,18 @@ Return ONLY a valid JSON object in this exact format:
         os.makedirs("memory", exist_ok=True)
         bank_path = "memory/semantic_bank.json"
         bank = load_semantic_bank(bank_path)
+        size_before = len(bank)
         bank.append(lesson_data)
         bank = dedupe_lessons(bank)[-MAX_SEMANTIC_LESSONS:]
         with open(bank_path, "w", encoding="utf-8") as f:
             json.dump(bank, f, indent=4)
-        print(f"Extracted and saved semantic lesson: {lesson_data.get('lesson')}")
+        if len(bank) > size_before:
+            print(f"Extracted and saved semantic lesson: {lesson_data.get('lesson')}")
+        else:
+            print(
+                "Extracted lesson deduplicated into an existing one for this "
+                f"location/hazard: {lesson_data.get('lesson')}"
+            )
 
     def analyze_environment(self, image_path):
         """Uses the Cloud VLM to proactively tag the current visual environment.

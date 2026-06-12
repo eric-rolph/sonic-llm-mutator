@@ -16,10 +16,25 @@ st_autorefresh(interval=5000, key="datarefresh")
 st.title("🦔 Sonic AI: LLM Evolutionary Genetic Algorithm")
 st.markdown("Watching an LLM dynamically write and mutate Python code to beat Sonic the Hedgehog.")
 
-HISTORY_PATH = "artifacts/history.json"
-CHAMPION_PATH = "policies/champion_policy.py"
-CHAMPION_VIDEO_PATH = "artifacts/videos/champion.mp4"
-LATEST_VIDEO_PATH = "artifacts/videos/latest.mp4"
+# Resolve everything relative to this file so the dashboard works no matter
+# which directory streamlit was launched from.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+HISTORY_PATH = os.path.join(BASE_DIR, "artifacts", "history.json")
+CHAMPION_PATH = os.path.join(BASE_DIR, "policies", "champion_policy.py")
+CHAMPION_VIDEO_PATH = os.path.join(BASE_DIR, "artifacts", "videos", "champion.mp4")
+LATEST_VIDEO_PATH = os.path.join(BASE_DIR, "artifacts", "videos", "latest.mp4")
+DIAGNOSIS_REPORT_PATH = os.path.join(BASE_DIR, "artifacts", "diagnosis", "latest_report.json")
+
+
+def resolve_artifact(path):
+    """History/diagnosis files record repo-relative paths; resolve them."""
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return path
+    return os.path.join(BASE_DIR, path)
+
 
 # Load History Data
 def load_data():
@@ -32,6 +47,42 @@ def load_data():
             return []
     return []
 
+
+def load_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def load_video_bytes(path, mtime, size):
+    """Cache video bytes by (path, mtime, size).
+
+    The autorefresh reruns this script every few seconds; re-reading and
+    re-hashing a 10+ MB mp4 each run made the page take longer to render
+    than the refresh interval. The cache key changes when the renderer
+    replaces the file, so new videos still appear.
+    """
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def show_video(path, waiting_message):
+    if not os.path.exists(path):
+        st.info(waiting_message)
+        return
+    try:
+        stat = os.stat(path)
+        st.video(load_video_bytes(path, stat.st_mtime, stat.st_size), format="video/mp4")
+    except PermissionError:
+        st.warning("Video is currently rendering (file locked by ffmpeg). It will appear on the next refresh!")
+    except OSError as e:
+        st.error(f"Error reading video: {e}")
+
+
 history_data = load_data()
 
 # Layout
@@ -39,30 +90,10 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("📺 The Champion Run")
-    if os.path.exists(CHAMPION_VIDEO_PATH):
-        try:
-            with open(CHAMPION_VIDEO_PATH, "rb") as f:
-                video_bytes = f.read()
-            st.video(video_bytes, format="video/mp4")
-        except PermissionError:
-            st.warning("Video is currently rendering (file locked by ffmpeg). It will appear on the next 5-second refresh!")
-        except Exception as e:
-            st.error(f"Error reading champion video: {e}")
-    else:
-        st.info("No champion video rendered yet. Waiting for a successful run...")
+    show_video(CHAMPION_VIDEO_PATH, "No champion video rendered yet. Waiting for a successful run...")
 
     st.subheader("📺 Latest Generation Attempt")
-    if os.path.exists(LATEST_VIDEO_PATH):
-        try:
-            with open(LATEST_VIDEO_PATH, "rb") as f:
-                video_bytes = f.read()
-            st.video(video_bytes, format="video/mp4")
-        except PermissionError:
-            st.warning("Video is currently rendering (file locked by ffmpeg). It will appear on the next 5-second refresh!")
-        except Exception as e:
-            st.error(f"Error reading latest video: {e}")
-    else:
-        st.info("No latest video rendered yet.")
+    show_video(LATEST_VIDEO_PATH, "No latest video rendered yet.")
 
     st.subheader("📈 Fitness Progression")
     if history_data:
@@ -87,6 +118,14 @@ with col1:
 
         st.markdown("**Failure Reason:**")
         st.error(latest.get("failure_reason", "Unknown"))
+
+        diagnosis = load_json(DIAGNOSIS_REPORT_PATH)
+        if diagnosis and diagnosis.get("report"):
+            st.markdown("**🔬 Agentic Failure Diagnosis (latest frontier):**")
+            st.info(diagnosis["report"])
+            evidence = resolve_artifact(diagnosis.get("evidence_screenshot"))
+            if evidence and os.path.exists(evidence):
+                st.image(evidence, caption="Diagnosis evidence frame (from interactive replay)")
 
         with st.sidebar:
             st.header("🧮 Fitness Calculation")
@@ -119,7 +158,7 @@ with col2:
     latest_code = ""
     archive_path = ""
     if history_data:
-        archive_path = history_data[-1].get("archive_path", "")
+        archive_path = resolve_artifact(history_data[-1].get("archive_path", "")) or ""
         if os.path.exists(archive_path):
             with open(archive_path, "r") as f:
                 latest_code = f.read()
