@@ -58,23 +58,36 @@ class FailureSnapshotRing:
         self._last_frame = None
         self.disabled = False
 
-    def record(self, env, frame, state):
+    def record(self, env, frame, state, act_max_x=None):
         """Capture a savestate at the cadence. Never raises into evaluation.
 
         Every offered state updates ``last_seen`` (the eventual failure
         moment); savestates are only captured at the cadence. A backend
         without savestate support disables the ring on first failure instead
         of paying a try/except per capture forever.
+
+        ``act_max_x`` is the evaluator's authoritative per-act progress —
+        prefer it: raw ``x_pos`` keeps reporting the PREVIOUS act's x for a
+        while after a transition (live-observed: the ring re-ingested Act 1's
+        x=9767 on frames already tagged act=1, despite resetting on the flag).
+        The internal zone/act reset remains as a best-effort fallback for
+        callers without that accounting.
         """
         if self.disabled:
             return False
         info = _info_subset(state)
-        zone_act = (info["zone"], info["act"])
-        if self._max_x_zone_act != zone_act:
-            self._max_x_zone_act = zone_act
-            self.max_x_seen = 0
+        if act_max_x is not None:
+            try:
+                self.max_x_seen = int(act_max_x)
+            except (TypeError, ValueError):
+                pass
+        else:
+            zone_act = (info["zone"], info["act"])
+            if self._max_x_zone_act != zone_act:
+                self._max_x_zone_act = zone_act
+                self.max_x_seen = 0
+            self.max_x_seen = max(self.max_x_seen, info["x_pos"])
         self.last_seen = (int(frame), info)
-        self.max_x_seen = max(self.max_x_seen, info["x_pos"])
         if self._last_frame is not None and frame - self._last_frame < self.interval:
             return False
         try:

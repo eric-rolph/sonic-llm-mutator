@@ -220,8 +220,8 @@ class EvaluatePolicyTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def record(self, env, frame, state):
-                self.calls.append((frame, dict(state)))
+            def record(self, env, frame, state, act_max_x=None):
+                self.calls.append((frame, dict(state), act_max_x))
 
         states = [
             {"x_pos": i * 10, "y_pos": 100, "rings": 0, "score": 0}
@@ -237,10 +237,12 @@ class EvaluatePolicyTests(unittest.TestCase):
         # Initial state plus one per stepped frame, frames monotonic; cadence
         # is the sink's own concern (FailureSnapshotRing tests cover it).
         self.assertEqual(len(sink.calls), 11)
-        frames = [frame for frame, _ in sink.calls]
+        frames = [frame for frame, _, _ in sink.calls]
         self.assertEqual(frames, sorted(frames))
         self.assertEqual(sink.calls[0][0], 0)
         self.assertEqual(sink.calls[-1][0], 10)
+        # The sink receives the evaluator's settle-aware per-act progress.
+        self.assertEqual(sink.calls[-1][2], 100)
 
     def test_cached_vision_context_applies_synchronously_without_api_call(self):
         class CachedVisionMutator:

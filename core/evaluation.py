@@ -188,8 +188,10 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
         zone_act = update_authoritative_progress(state, 0)
         # Savestate ring for agentic failure diagnosis; cadence and error
         # handling live inside the sink, so this is a cheap no-op most frames.
+        # max_x is the settle-aware per-act frontier the sink needs for honest
+        # experiment verdicts (raw x_pos goes stale across act transitions).
         if snapshot_sink is not None:
-            snapshot_sink.record(env, frames_alive, state)
+            snapshot_sink.record(env, frames_alive, state, act_max_x=max_x)
         while not done and frames_alive < max_frames:
             if proactive_vision:
                 # Pick up the most recent finished vision result without blocking.
@@ -276,7 +278,7 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
             state = env.get_state()
             zone_act = update_authoritative_progress(state, frames_alive - frames_before_action)
             if snapshot_sink is not None:
-                snapshot_sink.record(env, frames_alive, state)
+                snapshot_sink.record(env, frames_alive, state, act_max_x=max_x)
 
             if stuck_counter > STUCK_FRAME_LIMIT:
                 if verbose:

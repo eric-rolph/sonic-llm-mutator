@@ -80,6 +80,23 @@ class FailureSnapshotRingTests(unittest.TestCase):
         self.assertFalse(ring.record(env, 100, env.get_state()))
         self.assertEqual(ring.snapshots, [])
 
+    def test_authoritative_act_max_x_wins_over_stale_raw_x(self):
+        # The settle window: frames tagged act=1 can still report Act 1's x.
+        # When the evaluator supplies its per-act max, the ring must trust it
+        # over anything derived from raw x_pos.
+        env = FakeSavestateEnv()
+        ring = FailureSnapshotRing(interval=60, capacity=10)
+
+        ring.record(env, 0, {"x_pos": 9767, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3}, act_max_x=0)
+        ring.record(env, 60, {"x_pos": 2478, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3}, act_max_x=2478)
+        ring.record(env, 120, {"x_pos": 2191, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3}, act_max_x=2478)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ring.persist(tmp, failure_reason="stuck", failure_frame=120)
+            window = load_failure_window(tmp)
+
+        self.assertEqual(window["failure"]["frontier_x"], 2478)
+
     def test_frontier_x_resets_on_act_transition(self):
         # Live-observed bug: the baseline cleared Act 1 at x~9767, then failed
         # in Act 2 at x~2478 — and real Act-2 escapes (x=3418) were judged

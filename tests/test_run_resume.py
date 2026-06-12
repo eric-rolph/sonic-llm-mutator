@@ -127,7 +127,7 @@ class RunResumeTests(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def record(self, env, frame, state):
+            def record(self, env, frame, state, act_max_x=None):
                 self.calls += 1
 
         states = [{"x_pos": 100, "y_pos": 100, "rings": 0, "score": 0}] * 700
