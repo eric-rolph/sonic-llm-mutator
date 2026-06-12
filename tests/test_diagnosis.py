@@ -151,6 +151,27 @@ class FailureSnapshotRingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(FailureSnapshotRing().persist(tmp))
 
+    def test_load_rejects_path_traversal_file_entries(self):
+        # A window.json is an untrusted artifact; a "../" file entry must not
+        # reach a file outside the window dir (and into load_emulator_state).
+        with tempfile.TemporaryDirectory() as tmp:
+            window_dir = os.path.join(tmp, "window")
+            os.makedirs(window_dir)
+            secret = os.path.join(tmp, "secret.state")
+            with open(secret, "wb") as f:
+                f.write(b"host-secret")
+            with open(os.path.join(window_dir, "window.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "failure": {"frame": 1, "x_pos": 1},
+                        "snapshots": [{"frame": 0, "file": "../secret.state", "x_pos": 0}],
+                    },
+                    f,
+                )
+
+            # The only snapshot is a traversal entry -> rejected -> no window.
+            self.assertIsNone(load_failure_window(window_dir))
+
     def test_load_tolerates_missing_and_corrupt_windows(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(load_failure_window(os.path.join(tmp, "missing")))

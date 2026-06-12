@@ -24,6 +24,11 @@ SNAPSHOT_CAPACITY = 10        # ring depth: ~10 s of history before failure
 TRY_ACTIONS_MAX_FRAMES = 300  # hard cap per counterfactual rollout (~5 s)
 SEQUENCE_MAX_SEGMENTS = 5     # segments per try_action_sequence experiment
 SEQUENCE_MAX_FRAMES = 600     # total frames per sequence experiment (~10 s)
+
+# The emulator methods DiagnosisSession invokes through ProcessDiagnosisEnv.
+# This tuple IS the proxy contract -- the single place to edit when the
+# session needs a new emulator capability.
+DIAGNOSIS_ENV_METHODS = ("load_emulator_state", "get_state", "step", "get_screenshot")
 DEFAULT_WINDOW_DIR = "artifacts/diagnosis/window"
 DEFAULT_SCREENSHOT_DIR = "artifacts/diagnosis"
 
@@ -165,7 +170,14 @@ def load_failure_window(directory=DEFAULT_WINDOW_DIR):
     for entry in manifest.get("snapshots", []):
         if not isinstance(entry, dict):
             continue
-        path = os.path.join(directory, str(entry.get("file", "")))
+        name = str(entry.get("file", ""))
+        # Containment: a window.json is an untrusted artifact (shareable,
+        # MCP-touchable). Its file entries must be bare basenames inside the
+        # window dir, never "../secret.state" reaching elsewhere on the host
+        # and into the emulator via load_emulator_state.
+        if not name or name != os.path.basename(name):
+            continue
+        path = os.path.join(directory, name)
         if os.path.isfile(path):
             verified = dict(entry)
             verified["path"] = path
@@ -272,19 +284,17 @@ class ProcessDiagnosisEnv:
             raise RuntimeError(payload)
         return payload
 
-    def load_emulator_state(self, state_bytes):
-        return self._call("load_emulator_state", state_bytes)
-
-    def get_state(self):
-        return self._call("get_state")
-
-    def step(self, action):
-        return self._call("step", action)
-
-    def get_screenshot(self, filepath=None):
-        if filepath is None:
-            return self._call("get_screenshot")
-        return self._call("get_screenshot", filepath)
+    def __getattr__(self, name):
+        # Forward exactly the declared emulator methods to the worker. Adding a
+        # method DiagnosisSession needs is a one-line edit to
+        # DIAGNOSIS_ENV_METHODS -- the whole reason this proxy exists is that a
+        # method the proxy silently failed to expose broke diagnosis in live
+        # testing. Private/unknown attributes raise normally.
+        if name in DIAGNOSIS_ENV_METHODS:
+            def _forward(*args, **kwargs):
+                return self._call(name, *args, **kwargs)
+            return _forward
+        raise AttributeError(name)
 
     def _terminate(self):
         if self._process is not None and self._process.is_alive():
