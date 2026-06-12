@@ -251,7 +251,15 @@ class PopulationArchive:
         code_path = self.root / str(record.get("code_path", ""))
         return code_path.read_text(encoding="utf-8")
 
-    def select_parent_codes(self, rng=None, elite_limit=64, exploration_constant=0.2):
+    def select_parent_codes(self, rng=None, elite_limit=64, exploration_constant=0.2, min_fitness_fraction=0.25):
+        """Pick two crossover parents, balancing quality and exploration.
+
+        ``min_fitness_fraction`` floors parents at a fraction of the best
+        elite's fitness: live runs showed the exploration bonus repeatedly
+        resurrecting degenerate ancestors (fitness ~2k against a 54k champion)
+        whose offspring died in the first seconds — diversity among credible
+        policies is wanted, archaeology is not.
+        """
         rng = rng or __import__("random")
         records = self.load_records()
         elites = []
@@ -264,6 +272,14 @@ class PopulationArchive:
             elites.append((record, code))
             if len(elites) >= elite_limit:
                 break
+        if elites:
+            best_fitness = max(float(record.get("fitness", 0.0)) for record, _code in elites)
+            floor = best_fitness * float(min_fitness_fraction)
+            elites = [
+                (record, code)
+                for record, code in elites
+                if float(record.get("fitness", 0.0)) >= floor
+            ]
         if len(elites) < 2:
             return None
 

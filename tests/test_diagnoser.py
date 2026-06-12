@@ -304,6 +304,94 @@ class FrontierDiagnosisGatingTests(unittest.TestCase):
             persist_diagnosis_report({"report": ""}, "stuck", report_path=report_path)
             self.assertFalse(os.path.exists(report_path))
 
+    def test_stuck_frontier_gets_a_fresh_diagnosis_budget(self):
+        class CountingMutator:
+            def __init__(self):
+                self.calls = 0
+
+            def diagnose_failure(self, session, failure_reason, trace):
+                self.calls += 1
+                return {"report": "R", "evidence_screenshot": None, "verified_experiments": []}
+
+        class NullSession:
+            def __init__(self, window):
+                self.window = window
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            frontier = {
+                "failure_reason": "Sonic got stuck: stopped making forward progress.",
+                "trace": [],
+                "window": self.write_window(tmp),
+            }
+            mutator = CountingMutator()
+            cache = {}
+            report_path = os.path.join(tmp, "latest_report.json")
+
+            def diagnose(stagnation):
+                with redirect_stdout(StringIO()):
+                    return maybe_diagnose_frontier(
+                        mutator,
+                        frontier,
+                        cache,
+                        session_factory=NullSession,
+                        report_path=report_path,
+                        stagnation_counter=stagnation,
+                    )
+
+            diagnose(0)
+            diagnose(1)
+            diagnose(2)
+            self.assertEqual(mutator.calls, 1)  # cached while stagnation grows
+            diagnose(3)
+            self.assertEqual(mutator.calls, 2)  # fresh budget after 3 stagnant gens
+            diagnose(4)
+            self.assertEqual(mutator.calls, 2)  # re-cached against the new milestone
+
+    def test_frontier_with_verified_escape_is_not_rediagnosed(self):
+        class CountingMutator:
+            def __init__(self):
+                self.calls = 0
+
+            def diagnose_failure(self, session, failure_reason, trace):
+                self.calls += 1
+                return {
+                    "report": "R",
+                    "evidence_screenshot": None,
+                    "verified_experiments": [{"actions": "RIGHT,B"}],
+                }
+
+        class NullSession:
+            def __init__(self, window):
+                self.window = window
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            frontier = {
+                "failure_reason": "Sonic got stuck: stopped making forward progress.",
+                "trace": [],
+                "window": self.write_window(tmp),
+            }
+            mutator = CountingMutator()
+            cache = {}
+            report_path = os.path.join(tmp, "latest_report.json")
+            with redirect_stdout(StringIO()):
+                for stagnation in range(8):
+                    maybe_diagnose_frontier(
+                        mutator,
+                        frontier,
+                        cache,
+                        session_factory=NullSession,
+                        report_path=report_path,
+                        stagnation_counter=stagnation,
+                    )
+
+        self.assertEqual(mutator.calls, 1)  # the escape is already in hand
+
     def test_diagnosis_exception_is_cached_as_none(self):
         class ExplodingSessionFactory:
             def __init__(self, window):

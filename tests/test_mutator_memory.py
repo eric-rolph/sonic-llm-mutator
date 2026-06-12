@@ -505,6 +505,44 @@ class MutatorMemoryTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    def test_extract_and_save_skills_drops_global_state_functions_but_keeps_clean_ones(self):
+        # Champions carry injected guards built on global/globals(); copying
+        # them into a skill used to invalidate the WHOLE library and freeze
+        # skill learning. Offending functions are dropped individually now.
+        class GuardCopyingMutator(MutatorClient):
+            def __init__(self):
+                pass
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                return (
+                    "def replay_guard(state, _STATE):\n"
+                    "    global _DIAG_REPLAY_0_1_2393\n"
+                    "    if '_DIAG_REPLAY_0_1_2393' not in globals():\n"
+                    "        _DIAG_REPLAY_0_1_2393 = -1\n"
+                    "    return 'RIGHT'\n"
+                    "\n"
+                    "def clean_helper(state, _STATE):\n"
+                    "    return 'RIGHT,B'\n"
+                ), "local"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                os.makedirs("policies")
+                with redirect_stdout(StringIO()):
+                    GuardCopyingMutator().extract_and_save_skills(
+                        "def get_action(state):\n    return 'RIGHT'"
+                    )
+
+                with open("policies/skills.py", "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn("def clean_helper(state, _STATE):", content)
+                self.assertNotIn("replay_guard", content)
+                self.assertNotIn("globals()", content)
+            finally:
+                os.chdir(previous_cwd)
+
     def test_extract_and_save_skills_does_not_change_existing_skill_behavior(self):
         class RewritingSkillsMutator(MutatorClient):
             def __init__(self):
