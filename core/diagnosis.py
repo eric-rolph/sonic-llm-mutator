@@ -47,6 +47,7 @@ class FailureSnapshotRing:
         self.capacity = max(1, int(capacity))
         self.snapshots = []
         self.last_seen = None  # (frame, info) of the newest state offered
+        self.max_x_seen = 0   # the run's true frontier, not its final resting x
         self._last_frame = None
         self.disabled = False
 
@@ -61,6 +62,7 @@ class FailureSnapshotRing:
         if self.disabled:
             return False
         self.last_seen = (int(frame), _info_subset(state))
+        self.max_x_seen = max(self.max_x_seen, self.last_seen[1]["x_pos"])
         if self._last_frame is not None and frame - self._last_frame < self.interval:
             return False
         try:
@@ -98,6 +100,10 @@ class FailureSnapshotRing:
         failure = _info_subset(final_state)
         if failure_frame is not None:
             failure["frame"] = int(failure_frame)
+        # The run's furthest x. The final resting x can be far behind it
+        # (e.g. after a bounce-back), and experiments must be judged against
+        # the real frontier, not the spot Sonic happened to die on.
+        failure["frontier_x"] = max(self.max_x_seen, failure.get("x_pos", 0))
         manifest = {
             "failure_reason": str(failure_reason or ""),
             "created_at": int(time.time()),
@@ -315,6 +321,14 @@ class DiagnosisSession:
         except (TypeError, ValueError):
             return 0
 
+    def frontier_x(self):
+        """The run's furthest x; legacy windows fall back to the failure x."""
+        failure = self.window.get("failure", {})
+        try:
+            return int(failure.get("frontier_x", failure.get("x_pos", 0)))
+        except (TypeError, ValueError):
+            return self.failure_x()
+
     def describe_window(self):
         """Compact text table of the available moments, newest last."""
         failure = self.window.get("failure", {})
@@ -409,15 +423,16 @@ class DiagnosisSession:
             end = _info_subset(env.get_state())
             shot = self._take_screenshot(env, f"try_{snapshot['frame']}")
             offset = self.failure_frame() - int(snapshot.get("frame", 0))
-            passed_failure_x = max_x > self.failure_x()
+            passed_frontier_x = max_x > self.frontier_x()
             text = (
                 f"Held '{actions}' for {frames_done} frames starting {offset} frames before the failure. "
                 f"x: {start['x_pos']} -> {end['x_pos']} (max {max_x}), y: {start['y_pos']} -> {end['y_pos']}, "
                 f"rings: {start['rings']} -> {end['rings']}, lives: {start['lives']} -> {end['lives']}. "
-                f"Progressed past the failure x ({self.failure_x()}): {'YES' if passed_failure_x else 'no'}."
+                f"Beat the run's furthest progress (frontier x={self.frontier_x()}): "
+                f"{'YES' if passed_frontier_x else 'no'}."
                 + (" The episode ended during this experiment (death or level end)." if ended_early else "")
             )
-            return {"ok": True, "text": text, "screenshot": shot, "passed_failure_x": passed_failure_x}
+            return {"ok": True, "text": text, "screenshot": shot, "passed_frontier_x": passed_frontier_x}
         except Exception as e:
             self._drop_env()
             return {"ok": False, "text": f"try_actions failed: {type(e).__name__}: {e}", "screenshot": None}

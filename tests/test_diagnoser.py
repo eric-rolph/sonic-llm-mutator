@@ -74,7 +74,7 @@ class FakeSession:
             "ok": True,
             "text": f"Held '{actions}': progressed past the failure x: YES.",
             "screenshot": self._shot("try"),
-            "passed_failure_x": True,
+            "passed_frontier_x": True,
         }
 
     def close(self):
@@ -241,10 +241,16 @@ class FrontierDiagnosisGatingTests(unittest.TestCase):
             }
             mutator = CountingMutator()
             cache = {}
+            # Tests must never write the real artifacts/diagnosis report.
+            report_path = os.path.join(tmp, "latest_report.json")
 
             with redirect_stdout(StringIO()):
-                first = maybe_diagnose_frontier(mutator, frontier, cache, session_factory=NullSession)
-                second = maybe_diagnose_frontier(mutator, frontier, cache, session_factory=NullSession)
+                first = maybe_diagnose_frontier(
+                    mutator, frontier, cache, session_factory=NullSession, report_path=report_path
+                )
+                second = maybe_diagnose_frontier(
+                    mutator, frontier, cache, session_factory=NullSession, report_path=report_path
+                )
 
         self.assertEqual(first, {"report": "R", "evidence_screenshot": None})
         self.assertEqual(second, first)

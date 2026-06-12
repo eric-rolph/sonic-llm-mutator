@@ -174,7 +174,7 @@ class DiagnosisSessionTests(unittest.TestCase):
             self.assertTrue(os.path.exists(result["screenshot"]))
             self.assertEqual(session.last_screenshot, result["screenshot"])
 
-    def test_try_actions_reports_progress_past_failure_x(self):
+    def test_try_actions_reports_progress_past_frontier_x(self):
         with tempfile.TemporaryDirectory() as tmp:
             session, env = self.make_session(tmp)
 
@@ -182,13 +182,44 @@ class DiagnosisSessionTests(unittest.TestCase):
             result = session.try_actions(20, "RIGHT", 30)
 
             self.assertTrue(result["ok"])
-            self.assertTrue(result["passed_failure_x"])
+            self.assertTrue(result["passed_frontier_x"])
             self.assertIn("x: 360 -> 660", result["text"])
             self.assertIn("YES", result["text"])
 
-            # Stalling input never passes the failure x.
+            # Stalling input never beats the frontier.
             result = session.try_actions(20, "DOWN", 30)
-            self.assertFalse(result["passed_failure_x"])
+            self.assertFalse(result["passed_frontier_x"])
+
+    def test_experiments_are_judged_against_the_true_frontier_not_the_resting_x(self):
+        # Live testing showed Sonic can bounce far backward before the stuck
+        # detector fires: the run reached x=1000 but died at x=400. An
+        # experiment reaching 660 must NOT be reported as beating the run.
+        ring_env = FakeSavestateEnv()
+        ring = FailureSnapshotRing(interval=60, capacity=10)
+        for frame, x in ((0, 0), (60, 1000), (120, 240), (180, 360)):
+            ring_env.x = x
+            ring.record(ring_env, frame, ring_env.get_state())
+        with tempfile.TemporaryDirectory() as tmp:
+            window_dir = os.path.join(tmp, "window")
+            ring.persist(
+                window_dir,
+                failure_reason="Sonic got stuck",
+                final_state={"x_pos": 400, "y_pos": 100, "zone": 0, "act": 1, "rings": 0, "lives": 3},
+                failure_frame=200,
+            )
+            window = load_failure_window(window_dir)
+            self.assertEqual(window["failure"]["frontier_x"], 1000)
+
+            session = DiagnosisSession(
+                window,
+                env_factory=lambda: FakeSavestateEnv(),
+                screenshot_dir=os.path.join(tmp, "shots"),
+            )
+            result = session.try_actions(20, "RIGHT", 30)  # x 360 -> 660
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["passed_frontier_x"])
+        self.assertIn("frontier x=1000", result["text"])
 
     def test_try_actions_caps_hold_frames(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,7 +319,7 @@ class ProcessDiagnosisEnvTests(unittest.TestCase):
 
                 experiment = session.try_actions(20, "RIGHT", 30)
                 self.assertTrue(experiment["ok"], experiment["text"])
-                self.assertTrue(experiment["passed_failure_x"])
+                self.assertTrue(experiment["passed_frontier_x"])
                 self.assertTrue(os.path.exists(experiment["screenshot"]))
             finally:
                 session.close()

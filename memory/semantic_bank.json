@@ -131,5 +131,12 @@
         "lesson": "When forward progress stalls (x_velocity near 0) around X=2350 in Zone 0 Act 1, prioritize consistent 'RIGHT,B' jumps to clear vertical obstacles or escape dips.",
         "zone": 0,
         "act": 1
+    },
+    {
+        "x": 2380,
+        "hazard": "Vertical wall or ledge",
+        "lesson": "If x_velocity remains near zero while pressing RIGHT, press B to jump over the obstacle.",
+        "zone": 0,
+        "act": 1
     }
 ]

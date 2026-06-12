@@ -155,7 +155,7 @@ def persist_diagnosis_report(result, failure_reason, report_path=DIAGNOSIS_REPOR
         print(f"Failed to persist diagnosis report: {e}")
 
 
-def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, session_factory=None):
+def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, session_factory=None, report_path=DIAGNOSIS_REPORT_PATH):
     """Run agentic diagnosis on the frontier once; reuse while it is unchanged.
 
     Returns ``{"report", "evidence_screenshot"}`` or ``None``. The cache also
@@ -183,7 +183,7 @@ def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, s
         result = mutator.diagnose_failure(session, frontier.get("failure_reason"), frontier.get("trace"))
         if result:
             print("Diagnosis complete.")
-            persist_diagnosis_report(result, frontier.get("failure_reason"))
+            persist_diagnosis_report(result, frontier.get("failure_reason"), report_path=report_path)
     except Exception as e:
         print(f"Diagnosis skipped: {e}")
         result = None
