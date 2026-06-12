@@ -176,6 +176,28 @@ def get_action(state):
         with self.assertRaisesRegex(PolicyValidationError, "restricted runtime"):
             validate_policy_source(source)
 
+    def test_rejects_str_format_field_access_namespace_gadget(self):
+        # "{0.__class__}".format(state) walks attributes without an
+        # ast.Attribute node, sidestepping the dunder-attribute check.
+        for template in ('"{0.__class__}"', '"{0.__globals__}"', '"{x[0]}"'):
+            source = f"def get_action(state):\n    return {template}.format(state)\n"
+            with self.subTest(template=template):
+                with self.assertRaisesRegex(PolicyValidationError, "format field access"):
+                    validate_policy_source(source)
+
+    def test_allows_ordinary_format_and_fstrings(self):
+        # Plain placeholders and f-strings (the policies' own idiom) are fine.
+        validate_policy_source(
+            'def get_action(state):\n'
+            '    direction = "RIGHT"\n'
+            '    return "{},B".format(direction)\n'
+        )
+        validate_policy_source(
+            'def get_action(state):\n'
+            '    direction = state.get("dir", "RIGHT")\n'
+            '    return f"{direction},B"\n'
+        )
+
     def test_rejects_executable_top_level_statements(self):
         source = """
 while True:

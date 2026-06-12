@@ -1,5 +1,10 @@
 import ast
 import builtins
+import re
+
+# A format replacement field whose name reaches into an attribute or index:
+# "{0.attr}", "{x[key]}", "{.attr}". Plain "{}"/"{0}"/"{name}" are unaffected.
+_FORMAT_FIELD_ACCESS = re.compile(r"\{[^{}]*[.\[][^{}]*\}")
 
 SAFE_POLICY_BUILTIN_NAMES = {
     "ArithmeticError",
@@ -159,6 +164,18 @@ def _validate_source(source, require_get_action, allow_skills_import):
             and node.value.endswith("__")
         ):
             raise PolicyValidationError("Policy may not reference dunder names.")
+        # str.format field access ("{0.__class__}".format(x)) walks attributes
+        # without an ast.Attribute node, sidestepping the dunder-attribute check
+        # above -- a namespace-disclosure gadget. Generated code never needs
+        # format-field templates, so reject any "{ <field> . | [ }" form.
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and _FORMAT_FIELD_ACCESS.search(node.value)
+        ):
+            raise PolicyValidationError(
+                "Policy may not use str.format field access ('{0.attr}'/'{0[key]}')."
+            )
         if isinstance(node, ast.Name):
             if not require_get_action and node.id == "globals":
                 raise PolicyValidationError("Generated skills may not reference globals.")

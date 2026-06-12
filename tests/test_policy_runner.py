@@ -7,6 +7,70 @@ from core.policy_runner import PolicyRunner, PolicyTimeout
 from main import load_policy
 
 
+class SkillsSandboxTests(unittest.TestCase):
+    """A policy's imported skills must run under the SAME restricted builtins
+    as the policy -- not the real builtins module (the historical asymmetry)."""
+
+    def _run_with_skills(self, tmp, skills_src, policy_src):
+        os.makedirs(os.path.join(tmp, "policies"), exist_ok=True)
+        with open(os.path.join(tmp, "policies", "skills.py"), "w", encoding="utf-8") as f:
+            f.write(skills_src)
+        policy_path = os.path.join(tmp, "policy.py")
+        with open(policy_path, "w", encoding="utf-8") as f:
+            f.write(policy_src)
+        previous = os.getcwd()
+        os.chdir(tmp)  # load_policy resolves policies/skills.py relative to cwd
+        try:
+            policy = load_policy(policy_path)
+            return policy.get_action({"x_pos": 0})
+        finally:
+            os.chdir(previous)
+
+    def test_imported_skill_runs_and_is_callable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            action = self._run_with_skills(
+                tmp,
+                "def boost(state):\n    return 'RIGHT,B'\n",
+                "import policies.skills as skills\n"
+                "def get_action(state):\n    return skills.boost(state)\n",
+            )
+        self.assertEqual(action, "RIGHT,B")
+
+    def test_skills_module_executes_under_restricted_builtins(self):
+        # White-box: the validator blocks *naming* open/eval in skill source,
+        # but the deeper guarantee is that the skills module's __builtins__ is
+        # the restricted set (not the real builtins module) -- so even a
+        # validator gap can't reach open/eval/__import__ at runtime.
+        from core.policy_loader import SAFE_POLICY_BUILTINS, _restricted_skills_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_path = os.path.join(tmp, "skills.py")
+            with open(skills_path, "w", encoding="utf-8") as f:
+                f.write("def boost(state):\n    return 'RIGHT,B'\n")
+
+            module = _restricted_skills_module(skills_path)
+            module_builtins = module.__dict__["__builtins__"]
+
+        self.assertNotIn("open", module_builtins)
+        self.assertNotIn("eval", module_builtins)
+        self.assertNotIn("exec", module_builtins)
+        self.assertIn("abs", module_builtins)  # safe builtins still present
+        self.assertEqual(set(SAFE_POLICY_BUILTINS) - {"__import__"}, set(module_builtins) - {"__import__"})
+        # __import__ is the deny stub, not the real importer.
+        with self.assertRaises(ImportError):
+            module_builtins["__import__"]("os")
+
+    def test_from_import_form_also_restricted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            action = self._run_with_skills(
+                tmp,
+                "def boost(state):\n    return 'RIGHT,B'\n",
+                "from policies import skills\n"
+                "def get_action(state):\n    return skills.boost(state)\n",
+            )
+            self.assertEqual(action, "RIGHT,B")
+
+
 class FastPolicy:
     def get_action(self, state):
         return "RIGHT"

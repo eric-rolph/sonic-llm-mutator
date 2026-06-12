@@ -275,6 +275,43 @@ class GenerateCandidatesTests(unittest.TestCase):
         from core.policy_validator import validate_policy_source
         validate_policy_source(candidate)
 
+    def test_compiled_sequence_guard_replays_through_the_real_loader(self):
+        # Golden round-trip: the frame-replay guard's correctness depends on the
+        # runtime exec'ing the module once and persisting its global counter
+        # (core.policy_loader / PolicyRunner). Load the generated source through
+        # the REAL loader and drive get_action frame-by-frame, asserting each
+        # segment fires for its measured count -- this fails loudly if the
+        # codegen or the runtime's exec/global model ever drift apart.
+        from core.policy_loader import load_policy
+
+        working = "def get_action(state):\n    return 'RIGHT'\n"
+        experiment = {
+            "zone": 0, "act": 1, "start_x": 2400, "max_x": 2600, "actions": "RIGHT",
+            "segments": [
+                {"actions": "RIGHT", "frames": 3, "start_x": 2400},
+                {"actions": "RIGHT,B", "frames": 2, "start_x": 2430},
+                {"actions": "RIGHT", "frames": 2, "start_x": 2470},
+            ],
+        }
+        candidate = build_diagnosis_guard_candidate(working, experiment)
+        self.assertIsNotNone(candidate)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "guard_policy.py"
+            path.write_text(candidate, encoding="utf-8")
+            policy = load_policy(str(path))
+
+            # Inside the guard's x-band and act, the replay drives the segments
+            # by frame count regardless of the exact x each frame.
+            state = {"zone": 0, "act": 1, "x_pos": 2400}
+            actions = [policy.get_action(dict(state)) for _ in range(7)]
+
+        # 3x RIGHT, then 2x RIGHT,B (the full held jump), then 2x RIGHT, then
+        # the counter is spent and control returns to the base policy (RIGHT).
+        self.assertEqual(actions[:3], ["RIGHT", "RIGHT", "RIGHT"])
+        self.assertEqual(actions[3:5], ["RIGHT,B", "RIGHT,B"])
+        self.assertEqual(actions[5:7], ["RIGHT", "RIGHT"])
+
     def test_sequence_guard_compiles_backward_runups_too(self):
         # Frame replay does not need x-monotonic boundaries, so back-up-then-
         # charge sequences (the longer-runway strategy) compile as well.
