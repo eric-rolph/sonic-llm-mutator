@@ -221,6 +221,22 @@ class DiagnosisSessionTests(unittest.TestCase):
         self.assertFalse(result["passed_frontier_x"])
         self.assertIn("frontier x=1000", result["text"])
 
+    def test_verified_escapes_are_recorded_for_guard_compilation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp)
+
+            session.try_actions(20, "RIGHT", 30)  # x 360 -> 660, beats 400
+            session.try_actions(20, "DOWN", 30)   # stalls, no escape
+
+        self.assertEqual(len(session.verified_experiments), 1)
+        experiment = session.verified_experiments[0]
+        self.assertEqual(experiment["actions"], "RIGHT")
+        self.assertEqual(experiment["start_x"], 360)
+        self.assertEqual(experiment["max_x"], 660)
+        self.assertEqual(experiment["zone"], 0)
+        self.assertEqual(experiment["act"], 1)
+        self.assertEqual(experiment["hold_frames"], 30)
+
     def test_try_actions_caps_hold_frames(self):
         with tempfile.TemporaryDirectory() as tmp:
             session, env = self.make_session(tmp)

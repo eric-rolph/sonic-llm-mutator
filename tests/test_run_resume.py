@@ -225,7 +225,13 @@ class RunResumeTests(unittest.TestCase):
         with patch.object(main, "run_evaluation_loop") as run:
             self.assertEqual(main.main(["--generations", "15", "--frames", "2000"]), 0)
 
-        run.assert_called_once_with(generations=15, max_frames=2000)
+        run.assert_called_once_with(generations=15, max_frames=2000, n_candidates=2)
+
+    def test_cli_candidates_flag_widens_the_search(self):
+        with patch.object(main, "run_evaluation_loop") as run:
+            self.assertEqual(main.main(["--candidates", "3"]), 0)
+
+        run.assert_called_once_with(generations=None, max_frames=12000, n_candidates=3)
 
     def test_resume_state_uses_last_generation_and_persisted_stagnation(self):
         state = derive_resume_state(

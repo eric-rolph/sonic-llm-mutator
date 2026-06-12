@@ -295,6 +295,10 @@ class DiagnosisSession:
         self.screenshot_dir = screenshot_dir
         self._shot_count = 0
         self.last_screenshot = None
+        # Experiments that measurably beat the run's frontier. These are the
+        # most valuable diagnosis output: they can be compiled directly into a
+        # deterministic guard candidate without trusting an LLM translation.
+        self.verified_experiments = []
 
     def _ensure_env(self):
         if self._env is None:
@@ -424,12 +428,24 @@ class DiagnosisSession:
             shot = self._take_screenshot(env, f"try_{snapshot['frame']}")
             offset = self.failure_frame() - int(snapshot.get("frame", 0))
             passed_frontier_x = max_x > self.frontier_x()
+            if passed_frontier_x and not ended_early:
+                self.verified_experiments.append(
+                    {
+                        "zone": start["zone"],
+                        "act": start["act"],
+                        "start_x": start["x_pos"],
+                        "actions": str(actions),
+                        "hold_frames": frames_done,
+                        "max_x": max_x,
+                        "frames_before_failure": offset,
+                    }
+                )
             text = (
                 f"Held '{actions}' for {frames_done} frames starting {offset} frames before the failure. "
                 f"x: {start['x_pos']} -> {end['x_pos']} (max {max_x}), y: {start['y_pos']} -> {end['y_pos']}, "
                 f"rings: {start['rings']} -> {end['rings']}, lives: {start['lives']} -> {end['lives']}. "
                 f"Beat the run's furthest progress (frontier x={self.frontier_x()}): "
-                f"{'YES' if passed_frontier_x else 'no'}."
+                f"{'YES — VERIFIED ESCAPE, this input will be compiled into a candidate policy' if passed_frontier_x else 'no'}."
                 + (" The episode ended during this experiment (death or level end)." if ended_early else "")
             )
             return {"ok": True, "text": text, "screenshot": shot, "passed_frontier_x": passed_frontier_x}

@@ -190,17 +190,23 @@ def normalize_vision_context(content):
 
 
 # --- Agentic failure diagnosis -------------------------------------------
-# Hard ceiling on model-initiated emulator operations per diagnosis.
-DIAGNOSIS_MAX_TOOL_CALLS = 6
+# Hard ceiling on model-initiated emulator operations per diagnosis. One
+# diagnosis is cached for the whole life of a frontier, so a thorough hunt
+# amortizes across every stagnant generation that follows.
+DIAGNOSIS_MAX_TOOL_CALLS = 10
 
 DIAGNOSIS_SYSTEM_PROMPT = """You are a game-physics failure analyst with interactive control of a Sega Genesis emulator, paused around the moment a Sonic policy failed.
-Use the tools to find out WHY the failure happened and WHAT INPUT avoids it:
-- view_frame: look at the situation N frames before the failure.
-- try_actions: actually run a counterfactual experiment (e.g. "would holding RIGHT,B from 120 frames earlier clear the obstacle?"). A VERIFIED working input is the most valuable possible finding -- prefer experiments over speculation.
-You have a small tool budget; be economical. When confident, call finish_diagnosis with a concise report covering:
+PRIMARY GOAL: find, by experiment, an input that beats the run's furthest progress -- a try_actions result that says "Beat the run's furthest progress: YES". A verified escape is compiled directly into the next candidate policy, so it is worth more than any amount of description.
+- try_actions: run a counterfactual experiment. SPEND MOST OF YOUR BUDGET HERE. Each call independently rewinds and holds ONE button combination; vary both the input and the rewind distance:
+  * plain RIGHT from far back (maximum momentum)
+  * RIGHT,B at several different rewind offsets (jump timing matters)
+  * RIGHT,DOWN or DOWN,B (rolling/spindash through)
+  * UP,B or B alone (taller jump without pushing into the wall)
+- view_frame: look at the situation N frames before the failure (use sparingly; experiments teach more).
+When an experiment reports YES, or you are out of ideas, call finish_diagnosis with a concise report covering:
 1. What the obstacle/hazard actually is (from the screenshots).
 2. The earliest state cue that predicts it (x range, velocity pattern, vision context).
-3. Which input sequences you VERIFIED work or fail, with their measured outcomes.
+3. Which inputs you VERIFIED work or fail, with their measured outcomes.
 4. A concrete recommendation for the policy code."""
 
 DIAGNOSIS_TOOLS = [
@@ -578,7 +584,11 @@ def get_action(state):
                 report = message_text(message)
                 if not report:
                     raise ValueError("Diagnosis model returned an empty report.")
-                return {"report": report, "evidence_screenshot": session.last_screenshot}
+                return {
+                    "report": report,
+                    "evidence_screenshot": session.last_screenshot,
+                    "verified_experiments": list(getattr(session, "verified_experiments", [])),
+                }
 
             messages.append(
                 {
@@ -613,7 +623,11 @@ def get_action(state):
                     report = str(args.get("report", "")).strip() or message_text(message)
                     if not report:
                         raise ValueError("finish_diagnosis was called without a report.")
-                    return {"report": report, "evidence_screenshot": session.last_screenshot}
+                    return {
+                        "report": report,
+                        "evidence_screenshot": session.last_screenshot,
+                        "verified_experiments": list(getattr(session, "verified_experiments", [])),
+                    }
 
                 result = self._dispatch_diagnosis_tool(session, call.function.name, args)
                 # One line per tool call so the operator can watch the

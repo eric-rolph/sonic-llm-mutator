@@ -28,7 +28,9 @@ from core.diagnosis import (
 )
 from core.evaluation import build_policy_load_failure, evaluate_policy
 from core.frontier import (
+    build_diagnosis_guard_candidate,
     build_frontier_guard_candidate,
+    diagnosis_guard_marker,
     frontier_guard_marker,
     recently_attempted_frontier_guard,
 )
@@ -145,6 +147,7 @@ def persist_diagnosis_report(result, failure_reason, report_path=DIAGNOSIS_REPOR
                 {
                     "report": result.get("report", ""),
                     "evidence_screenshot": result.get("evidence_screenshot"),
+                    "verified_experiments": result.get("verified_experiments", []),
                     "failure_reason": str(failure_reason or ""),
                     "created_at": int(time.time()),
                 },
@@ -322,25 +325,47 @@ def generate_candidates(
     crossover_probability=0.30,
     parent_selector=None,
     diagnosis_report=None,
+    verified_experiments=None,
 ):
     """Request ``n_candidates`` new policies from the mutator.
 
     Most are mutations of the working policy; when the pool is large enough a
-    fraction become FunSearch crossovers of two pooled parents. Returns a list
-    of ``(code, reasoning)`` tuples. A request that errors falls back to the
-    working policy so every slot is filled.
+    fraction become FunSearch crossovers of two pooled parents. At most one
+    slot goes to a deterministic candidate: a guard compiled from a VERIFIED
+    diagnosis experiment when one exists, else the stationary-frontier guard.
+    Returns a list of ``(code, reasoning)`` tuples. A request that errors
+    falls back to the working policy so every slot is filled.
     """
     candidates_code = [None] * n_candidates
     first_llm_slot = 0
-    frontier_guard = build_frontier_guard_candidate(working_code, last_trace)
-    if frontier_guard is not None and recently_attempted_frontier_guard(
-        frontier_guard_marker(frontier_guard),
-        recent_history,
+
+    deterministic = None
+    reasoning_label = None
+    # A measured escape beats the heuristic recovery guard: try the best
+    # verified experiment (furthest measured x) first.
+    for experiment in sorted(
+        verified_experiments or [], key=lambda e: e.get("max_x", 0), reverse=True
     ):
-        frontier_guard = None
-    if n_candidates > 0 and frontier_guard is not None:
-        print("Adding deterministic frontier-guard candidate.")
-        candidates_code[0] = (frontier_guard, "Deterministic frontier guard")
+        guard = build_diagnosis_guard_candidate(working_code, experiment)
+        if guard is not None and not recently_attempted_frontier_guard(
+            diagnosis_guard_marker(guard), recent_history
+        ):
+            deterministic = guard
+            reasoning_label = "Diagnosed guard (verified input)"
+            break
+
+    if deterministic is None:
+        frontier_guard = build_frontier_guard_candidate(working_code, last_trace)
+        if frontier_guard is not None and not recently_attempted_frontier_guard(
+            frontier_guard_marker(frontier_guard),
+            recent_history,
+        ):
+            deterministic = frontier_guard
+            reasoning_label = "Deterministic frontier guard"
+
+    if n_candidates > 0 and deterministic is not None:
+        print(f"Adding deterministic candidate: {reasoning_label}.")
+        candidates_code[0] = (deterministic, reasoning_label)
         first_llm_slot = 1
 
     # max_workers=1 serialises requests so we never hammer a local LLM that
@@ -592,6 +617,7 @@ def run_evaluation_loop(
         )
         diagnosis_report = diagnosis.get("report") if diagnosis else None
         evidence_screenshot = diagnosis.get("evidence_screenshot") if diagnosis else None
+        verified_experiments = diagnosis.get("verified_experiments") if diagnosis else None
 
         # Generate candidates
         recent_history = history.get_recent_history(3)
@@ -607,6 +633,7 @@ def run_evaluation_loop(
             pool_codes,
             parent_selector=population.select_parent_codes,
             diagnosis_report=diagnosis_report,
+            verified_experiments=verified_experiments,
         )
 
         # Evaluate candidates
@@ -663,8 +690,8 @@ def run_evaluation_loop(
                     if candidate_bk2_path != latest_bk2:
                         os.rename(latest_bk2, candidate_bk2_path)
 
-            marker = frontier_guard_marker(new_code)
-            if reasoning == "Deterministic frontier guard" and marker is not None:
+            marker = frontier_guard_marker(new_code) or diagnosis_guard_marker(new_code)
+            if reasoning in ("Deterministic frontier guard", "Diagnosed guard (verified input)") and marker is not None:
                 components = dict(components)
                 components["frontier_guard_marker"] = marker
                 attempted_frontier_markers.add(marker)
@@ -797,9 +824,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Run the Sonic policy evolution loop.")
     parser.add_argument("--generations", type=int, help="Number of additional generations to run.")
     parser.add_argument("--frames", type=int, default=12000, help="Maximum emulator frames per candidate.")
+    parser.add_argument("--candidates", type=int, default=2, help="Candidates evaluated per generation.")
     args = parser.parse_args(argv)
 
-    run_evaluation_loop(generations=args.generations, max_frames=args.frames)
+    run_evaluation_loop(
+        generations=args.generations,
+        max_frames=args.frames,
+        n_candidates=max(1, args.candidates),
+    )
     return 0
 
 
