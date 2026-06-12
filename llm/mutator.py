@@ -197,7 +197,7 @@ DIAGNOSIS_MAX_TOOL_CALLS = 10
 
 DIAGNOSIS_SYSTEM_PROMPT = """You are a game-physics failure analyst with interactive control of a Sega Genesis emulator, paused around the moment a Sonic policy failed.
 PRIMARY GOAL: find, by experiment, an input that beats the run's furthest progress -- a result that says "Beat the run's furthest progress: YES". A verified escape is compiled directly into the next candidate policy, so it is worth more than any amount of description.
-- try_action_sequence: play TIMED SEGMENTS, e.g. [{"actions":"RIGHT","frames":90},{"actions":"RIGHT,B","frames":40}]. THIS IS USUALLY THE WINNING TOOL: Sonic's jump fires on the B PRESS, so a held "RIGHT,B" jumps exactly once at the start -- "build speed, THEN jump at the edge" is only expressible as a sequence. Vary run-up length to move the jump point.
+- try_action_sequence: play TIMED SEGMENTS, e.g. [{"actions":"RIGHT","frames":90},{"actions":"RIGHT,B","frames":40}]. THIS IS USUALLY THE WINNING TOOL: Sonic's jump fires on the B PRESS, so a held "RIGHT,B" jumps exactly once at the start -- "build speed, THEN jump at the edge" is only expressible as a sequence. Vary run-up length to move the jump point. IMPORTANT: every rewind point lies on the FAILING run's own path, so Sonic arrives with the same losing momentum -- if forward attempts keep falling short, back up first to build a longer runway (e.g. [{"actions":"LEFT","frames":90},{"actions":"RIGHT","frames":150},{"actions":"RIGHT,B","frames":40}]).
 - try_actions: hold ONE combination for N frames (momentum tests: plain RIGHT from far back, RIGHT,DOWN rolling).
 - view_frame: look at the situation N frames before the failure (use sparingly; experiments teach more).
 When an experiment reports YES, or you are out of ideas, call finish_diagnosis with a concise report covering:
@@ -665,10 +665,17 @@ def get_action(state):
                 result = self._dispatch_diagnosis_tool(session, call.function.name, args)
                 # One line per tool call so the operator can watch the
                 # investigation progress (and spot broken tools immediately).
-                outcome = "ok" if result.get("ok") else "ERROR"
+                # The verdict lives at the END of experiment texts, so log the
+                # tail as well as the head.
+                if result.get("ok"):
+                    outcome = "VERIFIED ESCAPE" if result.get("passed_frontier_x") else "ok"
+                else:
+                    outcome = "ERROR"
+                text = str(result.get("text", ""))
+                summary = text[:110] + (" ... " + text[-90:] if len(text) > 200 else "")
                 print(
                     f"  diagnosis: {call.function.name}({json.dumps(args, sort_keys=True)}) "
-                    f"-> {outcome}: {str(result.get('text', ''))[:120]}"
+                    f"-> {outcome}: {summary}"
                 )
                 messages.append(
                     {
