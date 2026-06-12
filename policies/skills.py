@@ -206,3 +206,18 @@ def semantic_memory_fix_2330_2385(state, _STATE):
                 _STATE["jump_timer"] = 15
                 return "RIGHT,B"
     return None
+
+
+def semantic_memory_fix_zone0_act1_midsection(state, _STATE):
+    current_x = state.get("x_pos", 0)
+    if (
+        state.get("zone") == 0
+        and state.get("act") == 1
+        and 2379 <= current_x < 3326
+    ):
+        if current_x >= 2498:
+            return "RIGHT"
+        if current_x >= 2453:
+            return "RIGHT,B"
+        return "RIGHT"
+    return None
