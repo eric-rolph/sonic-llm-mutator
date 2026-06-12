@@ -9,12 +9,14 @@ the LLM mutator and the persistent history/population archives.
 import argparse
 import concurrent.futures
 import glob
+import json
 import math
 import os
 import random
 import shutil
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.abspath("."))
 
@@ -129,7 +131,31 @@ def diagnosable_failure(failure_reason):
     return "stuck" in reason or "fatal" in reason or "lost a life" in reason
 
 
-def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, session_factory=None):
+DIAGNOSIS_REPORT_PATH = os.path.join("artifacts", "diagnosis", "latest_report.json")
+
+
+def persist_diagnosis_report(result, failure_reason, report_path=DIAGNOSIS_REPORT_PATH):
+    """Write the latest diagnosis where the dashboard can show it."""
+    if not result or not result.get("report"):
+        return
+    try:
+        atomic_write_text(
+            report_path,
+            json.dumps(
+                {
+                    "report": result.get("report", ""),
+                    "evidence_screenshot": result.get("evidence_screenshot"),
+                    "failure_reason": str(failure_reason or ""),
+                    "created_at": int(time.time()),
+                },
+                indent=2,
+            ),
+        )
+    except Exception as e:
+        print(f"Failed to persist diagnosis report: {e}")
+
+
+def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, session_factory=None, report_path=DIAGNOSIS_REPORT_PATH):
     """Run agentic diagnosis on the frontier once; reuse while it is unchanged.
 
     Returns ``{"report", "evidence_screenshot"}`` or ``None``. The cache also
@@ -157,6 +183,7 @@ def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, s
         result = mutator.diagnose_failure(session, frontier.get("failure_reason"), frontier.get("trace"))
         if result:
             print("Diagnosis complete.")
+            persist_diagnosis_report(result, frontier.get("failure_reason"), report_path=report_path)
     except Exception as e:
         print(f"Diagnosis skipped: {e}")
         result = None

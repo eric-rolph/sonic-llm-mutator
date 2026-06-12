@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from llm.mutator import MutatorClient
-from main import diagnosable_failure, maybe_diagnose_frontier
+from main import diagnosable_failure, maybe_diagnose_frontier, persist_diagnosis_report
 
 
 def tool_call(call_id, name, arguments):
@@ -74,7 +74,7 @@ class FakeSession:
             "ok": True,
             "text": f"Held '{actions}': progressed past the failure x: YES.",
             "screenshot": self._shot("try"),
-            "passed_failure_x": True,
+            "passed_frontier_x": True,
         }
 
     def close(self):
@@ -241,10 +241,16 @@ class FrontierDiagnosisGatingTests(unittest.TestCase):
             }
             mutator = CountingMutator()
             cache = {}
+            # Tests must never write the real artifacts/diagnosis report.
+            report_path = os.path.join(tmp, "latest_report.json")
 
             with redirect_stdout(StringIO()):
-                first = maybe_diagnose_frontier(mutator, frontier, cache, session_factory=NullSession)
-                second = maybe_diagnose_frontier(mutator, frontier, cache, session_factory=NullSession)
+                first = maybe_diagnose_frontier(
+                    mutator, frontier, cache, session_factory=NullSession, report_path=report_path
+                )
+                second = maybe_diagnose_frontier(
+                    mutator, frontier, cache, session_factory=NullSession, report_path=report_path
+                )
 
         self.assertEqual(first, {"report": "R", "evidence_screenshot": None})
         self.assertEqual(second, first)
@@ -265,6 +271,31 @@ class FrontierDiagnosisGatingTests(unittest.TestCase):
             )
             with mock.patch.dict(os.environ, {"SONIC_AGENTIC_DIAGNOSIS": "0"}):
                 self.assertIsNone(maybe_diagnose_frontier(mutator, real, {}))
+
+    def test_persist_diagnosis_report_writes_dashboard_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = os.path.join(tmp, "latest_report.json")
+
+            persist_diagnosis_report(
+                {"report": "Verified RIGHT,B clears the wall.", "evidence_screenshot": "artifacts/diagnosis/x.png"},
+                "Sonic got stuck",
+                report_path=report_path,
+            )
+
+            with open(report_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+        self.assertEqual(payload["report"], "Verified RIGHT,B clears the wall.")
+        self.assertEqual(payload["evidence_screenshot"], "artifacts/diagnosis/x.png")
+        self.assertEqual(payload["failure_reason"], "Sonic got stuck")
+        self.assertIn("created_at", payload)
+
+    def test_persist_diagnosis_report_ignores_empty_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = os.path.join(tmp, "latest_report.json")
+            persist_diagnosis_report(None, "stuck", report_path=report_path)
+            persist_diagnosis_report({"report": ""}, "stuck", report_path=report_path)
+            self.assertFalse(os.path.exists(report_path))
 
     def test_diagnosis_exception_is_cached_as_none(self):
         class ExplodingSessionFactory:

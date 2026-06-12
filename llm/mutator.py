@@ -556,7 +556,9 @@ def get_action(state):
                 "model": self.macro_model,
                 "messages": messages,
                 "temperature": 0.3,
-                "max_tokens": 2048,
+                # Roomy enough that the final report does not truncate
+                # mid-sentence (observed at 2048 with gemma in live testing).
+                "max_tokens": 3072,
                 "timeout": 120,
             }
             if not force_finish:
@@ -607,12 +609,20 @@ def get_action(state):
                     args = {}
 
                 if call.function.name == "finish_diagnosis":
+                    print("  diagnosis: finish_diagnosis")
                     report = str(args.get("report", "")).strip() or message_text(message)
                     if not report:
                         raise ValueError("finish_diagnosis was called without a report.")
                     return {"report": report, "evidence_screenshot": session.last_screenshot}
 
                 result = self._dispatch_diagnosis_tool(session, call.function.name, args)
+                # One line per tool call so the operator can watch the
+                # investigation progress (and spot broken tools immediately).
+                outcome = "ok" if result.get("ok") else "ERROR"
+                print(
+                    f"  diagnosis: {call.function.name}({json.dumps(args, sort_keys=True)}) "
+                    f"-> {outcome}: {str(result.get('text', ''))[:120]}"
+                )
                 messages.append(
                     {
                         "role": "tool",
@@ -661,11 +671,18 @@ Return ONLY a valid JSON object in this exact format:
         os.makedirs("memory", exist_ok=True)
         bank_path = "memory/semantic_bank.json"
         bank = load_semantic_bank(bank_path)
+        size_before = len(bank)
         bank.append(lesson_data)
         bank = dedupe_lessons(bank)[-MAX_SEMANTIC_LESSONS:]
         with open(bank_path, "w", encoding="utf-8") as f:
             json.dump(bank, f, indent=4)
-        print(f"Extracted and saved semantic lesson: {lesson_data.get('lesson')}")
+        if len(bank) > size_before:
+            print(f"Extracted and saved semantic lesson: {lesson_data.get('lesson')}")
+        else:
+            print(
+                "Extracted lesson deduplicated into an existing one for this "
+                f"location/hazard: {lesson_data.get('lesson')}"
+            )
 
     def analyze_environment(self, image_path):
         """Uses the Cloud VLM to proactively tag the current visual environment.

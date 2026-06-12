@@ -7,6 +7,7 @@ from core.diagnosis import (
     TRY_ACTIONS_MAX_FRAMES,
     DiagnosisSession,
     FailureSnapshotRing,
+    ProcessDiagnosisEnv,
     load_failure_window,
     window_key,
 )
@@ -173,7 +174,7 @@ class DiagnosisSessionTests(unittest.TestCase):
             self.assertTrue(os.path.exists(result["screenshot"]))
             self.assertEqual(session.last_screenshot, result["screenshot"])
 
-    def test_try_actions_reports_progress_past_failure_x(self):
+    def test_try_actions_reports_progress_past_frontier_x(self):
         with tempfile.TemporaryDirectory() as tmp:
             session, env = self.make_session(tmp)
 
@@ -181,13 +182,44 @@ class DiagnosisSessionTests(unittest.TestCase):
             result = session.try_actions(20, "RIGHT", 30)
 
             self.assertTrue(result["ok"])
-            self.assertTrue(result["passed_failure_x"])
+            self.assertTrue(result["passed_frontier_x"])
             self.assertIn("x: 360 -> 660", result["text"])
             self.assertIn("YES", result["text"])
 
-            # Stalling input never passes the failure x.
+            # Stalling input never beats the frontier.
             result = session.try_actions(20, "DOWN", 30)
-            self.assertFalse(result["passed_failure_x"])
+            self.assertFalse(result["passed_frontier_x"])
+
+    def test_experiments_are_judged_against_the_true_frontier_not_the_resting_x(self):
+        # Live testing showed Sonic can bounce far backward before the stuck
+        # detector fires: the run reached x=1000 but died at x=400. An
+        # experiment reaching 660 must NOT be reported as beating the run.
+        ring_env = FakeSavestateEnv()
+        ring = FailureSnapshotRing(interval=60, capacity=10)
+        for frame, x in ((0, 0), (60, 1000), (120, 240), (180, 360)):
+            ring_env.x = x
+            ring.record(ring_env, frame, ring_env.get_state())
+        with tempfile.TemporaryDirectory() as tmp:
+            window_dir = os.path.join(tmp, "window")
+            ring.persist(
+                window_dir,
+                failure_reason="Sonic got stuck",
+                final_state={"x_pos": 400, "y_pos": 100, "zone": 0, "act": 1, "rings": 0, "lives": 3},
+                failure_frame=200,
+            )
+            window = load_failure_window(window_dir)
+            self.assertEqual(window["failure"]["frontier_x"], 1000)
+
+            session = DiagnosisSession(
+                window,
+                env_factory=lambda: FakeSavestateEnv(),
+                screenshot_dir=os.path.join(tmp, "shots"),
+            )
+            result = session.try_actions(20, "RIGHT", 30)  # x 360 -> 660
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["passed_frontier_x"])
+        self.assertIn("frontier x=1000", result["text"])
 
     def test_try_actions_caps_hold_frames(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -219,6 +251,78 @@ class DiagnosisSessionTests(unittest.TestCase):
         session = DiagnosisSession({"snapshots": [], "failure": {}}, env_factory=FakeSavestateEnv)
         result = session.view_frame(60)
         self.assertFalse(result["ok"])
+
+
+class ProcessDiagnosisEnvTests(unittest.TestCase):
+    """The emulator allows one instance per process, so diagnosis envs live
+    in a spawned child; these tests drive the proxy against an importable
+    stub env across a real process boundary."""
+
+    def test_proxy_round_trips_state_steps_and_screenshots(self):
+        env = ProcessDiagnosisEnv(factory_spec="tests._diagnosis_env_stub:make_stub_env")
+        try:
+            env.load_emulator_state(b"state-x-240")
+            self.assertEqual(env.get_state()["x_pos"], 240)
+
+            obs, reward, done, info = env.step([0] * 7 + [1] + [0] * 4)  # RIGHT
+            self.assertIsNone(obs)  # heavy frame stripped before pickling
+            self.assertEqual(info["x"], 250)
+
+            with tempfile.TemporaryDirectory() as tmp:
+                shot = os.path.join(tmp, "proxy.png")
+                self.assertEqual(env.get_screenshot(shot), shot)
+                self.assertTrue(os.path.exists(shot))
+        finally:
+            env.close()
+
+    def test_proxy_surfaces_child_errors_as_runtime_errors(self):
+        env = ProcessDiagnosisEnv(factory_spec="tests._diagnosis_env_stub:make_stub_env")
+        try:
+            with self.assertRaises(RuntimeError):
+                env.load_emulator_state(b"not-a-valid-state")
+            # The worker survives a failed call and serves the next one.
+            env.load_emulator_state(b"state-x-10")
+            self.assertEqual(env.get_state()["x_pos"], 10)
+        finally:
+            env.close()
+
+    def test_broken_factory_fails_construction_with_reason(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            ProcessDiagnosisEnv(factory_spec="tests._diagnosis_env_stub:make_broken_env")
+        self.assertIn("stub factory exploded", str(ctx.exception))
+
+    def test_diagnosis_session_works_end_to_end_over_the_proxy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ring_env = FakeSavestateEnv()
+            ring = FailureSnapshotRing(interval=60, capacity=10)
+            for frame in (0, 60, 120, 180):
+                ring_env.x = frame * 2
+                ring.record(ring_env, frame, ring_env.get_state())
+            window_dir = os.path.join(tmp, "window")
+            ring.persist(
+                window_dir,
+                failure_reason="Sonic got stuck",
+                final_state={"x_pos": 400, "y_pos": 100, "zone": 0, "act": 1, "rings": 0, "lives": 3},
+                failure_frame=200,
+            )
+            session = DiagnosisSession(
+                load_failure_window(window_dir),
+                env_factory=lambda: ProcessDiagnosisEnv(
+                    factory_spec="tests._diagnosis_env_stub:make_stub_env"
+                ),
+                screenshot_dir=os.path.join(tmp, "shots"),
+            )
+            try:
+                view = session.view_frame(20)
+                self.assertTrue(view["ok"], view["text"])
+                self.assertIn('"x_pos": 360', view["text"])
+
+                experiment = session.try_actions(20, "RIGHT", 30)
+                self.assertTrue(experiment["ok"], experiment["text"])
+                self.assertTrue(experiment["passed_frontier_x"])
+                self.assertTrue(os.path.exists(experiment["screenshot"]))
+            finally:
+                session.close()
 
 
 if __name__ == "__main__":

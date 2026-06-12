@@ -9,8 +9,11 @@ authoritative state, take screenshots, and run counterfactual inputs — on a
 dedicated non-recording env so experiments never pollute training recordings.
 """
 
+import importlib
 import json
+import multiprocessing
 import os
+import queue
 import time
 
 from core.actions import action_string_to_array
@@ -44,6 +47,7 @@ class FailureSnapshotRing:
         self.capacity = max(1, int(capacity))
         self.snapshots = []
         self.last_seen = None  # (frame, info) of the newest state offered
+        self.max_x_seen = 0   # the run's true frontier, not its final resting x
         self._last_frame = None
         self.disabled = False
 
@@ -58,6 +62,7 @@ class FailureSnapshotRing:
         if self.disabled:
             return False
         self.last_seen = (int(frame), _info_subset(state))
+        self.max_x_seen = max(self.max_x_seen, self.last_seen[1]["x_pos"])
         if self._last_frame is not None and frame - self._last_frame < self.interval:
             return False
         try:
@@ -95,6 +100,10 @@ class FailureSnapshotRing:
         failure = _info_subset(final_state)
         if failure_frame is not None:
             failure["frame"] = int(failure_frame)
+        # The run's furthest x. The final resting x can be far behind it
+        # (e.g. after a bounce-back), and experiments must be judged against
+        # the real frontier, not the spot Sonic happened to die on.
+        failure["frontier_x"] = max(self.max_x_seen, failure.get("x_pos", 0))
         manifest = {
             "failure_reason": str(failure_reason or ""),
             "created_at": int(time.time()),
@@ -152,10 +161,123 @@ def window_key(window):
     return f"{window.get('directory', '')}:{window.get('created_at', 0)}:{window.get('failure_reason', '')}"
 
 
-def _default_env_factory():
+def _default_child_env():
+    """The real emulator the diagnosis worker process hosts."""
     from emulator.sonic_env import SonicEnvWrapper
 
     return SonicEnvWrapper(record_path=None)
+
+
+def _import_callable(spec):
+    module_name, _, attribute = spec.partition(":")
+    module = importlib.import_module(module_name)
+    return getattr(module, attribute)
+
+
+def _diagnosis_env_worker(factory_spec, request_queue, response_queue):
+    try:
+        env = _import_callable(factory_spec)()
+    except Exception as e:  # noqa: BLE001 - surfaced to the parent
+        response_queue.put(("error", f"{type(e).__name__}: {e}"))
+        return
+    response_queue.put(("ready", None))
+    while True:
+        request = request_queue.get()
+        if request is None:
+            break
+        method, args, kwargs = request
+        try:
+            result = getattr(env, method)(*args, **kwargs)
+            if method == "step":
+                # The observation frame is heavy to pickle and diagnosis only
+                # reads RAM state plus screenshots the child writes to disk.
+                result = (None,) + tuple(result[1:])
+            response_queue.put(("ok", result))
+        except Exception as e:  # noqa: BLE001 - surfaced to the parent
+            response_queue.put(("error", f"{type(e).__name__}: {e}"))
+    try:
+        env.close()
+    except Exception:
+        pass
+
+
+class ProcessDiagnosisEnv:
+    """Hosts the diagnosis emulator in a child process and proxies calls.
+
+    gym-retro (and stable-retro) allow only **one emulator instance per
+    process**, and the training env already occupies the training process —
+    creating a second in-process env raises RuntimeError, which is exactly
+    what broke every diagnosis tool in live testing. A spawned child process
+    gets its own instance; the proxy forwards the few methods
+    :class:`DiagnosisSession` needs over queues (the same pattern
+    ``core.policy_runner`` uses for policy isolation).
+    """
+
+    DEFAULT_FACTORY_SPEC = "core.diagnosis:_default_child_env"
+
+    def __init__(self, factory_spec=DEFAULT_FACTORY_SPEC, start_timeout=90.0, call_timeout=60.0):
+        self._call_timeout = call_timeout
+        context = multiprocessing.get_context("spawn")
+        self._requests = context.Queue()
+        self._responses = context.Queue()
+        self._process = context.Process(
+            target=_diagnosis_env_worker,
+            args=(factory_spec, self._requests, self._responses),
+            name="diagnosis-env",
+            daemon=True,
+        )
+        self._process.start()
+        try:
+            status, payload = self._responses.get(timeout=start_timeout)
+        except queue.Empty:
+            self._terminate()
+            raise RuntimeError("Diagnosis env worker did not start in time.")
+        if status != "ready":
+            self._terminate()
+            raise RuntimeError(f"Diagnosis env worker failed to start: {payload}")
+
+    def _call(self, method, *args, **kwargs):
+        self._requests.put((method, args, kwargs))
+        try:
+            status, payload = self._responses.get(timeout=self._call_timeout)
+        except queue.Empty:
+            self._terminate()
+            raise RuntimeError(f"Diagnosis env call timed out: {method}")
+        if status == "error":
+            raise RuntimeError(payload)
+        return payload
+
+    def load_emulator_state(self, state_bytes):
+        return self._call("load_emulator_state", state_bytes)
+
+    def get_state(self):
+        return self._call("get_state")
+
+    def step(self, action):
+        return self._call("step", action)
+
+    def get_screenshot(self, filepath=None):
+        if filepath is None:
+            return self._call("get_screenshot")
+        return self._call("get_screenshot", filepath)
+
+    def _terminate(self):
+        if self._process is not None and self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=2.0)
+
+    def close(self):
+        try:
+            self._requests.put_nowait(None)
+        except Exception:
+            pass
+        if self._process is not None:
+            self._process.join(timeout=2.0)
+        self._terminate()
+
+
+def _default_env_factory():
+    return ProcessDiagnosisEnv()
 
 
 class DiagnosisSession:
@@ -198,6 +320,14 @@ class DiagnosisSession:
             return int(self.window.get("failure", {}).get("x_pos", 0))
         except (TypeError, ValueError):
             return 0
+
+    def frontier_x(self):
+        """The run's furthest x; legacy windows fall back to the failure x."""
+        failure = self.window.get("failure", {})
+        try:
+            return int(failure.get("frontier_x", failure.get("x_pos", 0)))
+        except (TypeError, ValueError):
+            return self.failure_x()
 
     def describe_window(self):
         """Compact text table of the available moments, newest last."""
@@ -293,15 +423,16 @@ class DiagnosisSession:
             end = _info_subset(env.get_state())
             shot = self._take_screenshot(env, f"try_{snapshot['frame']}")
             offset = self.failure_frame() - int(snapshot.get("frame", 0))
-            passed_failure_x = max_x > self.failure_x()
+            passed_frontier_x = max_x > self.frontier_x()
             text = (
                 f"Held '{actions}' for {frames_done} frames starting {offset} frames before the failure. "
                 f"x: {start['x_pos']} -> {end['x_pos']} (max {max_x}), y: {start['y_pos']} -> {end['y_pos']}, "
                 f"rings: {start['rings']} -> {end['rings']}, lives: {start['lives']} -> {end['lives']}. "
-                f"Progressed past the failure x ({self.failure_x()}): {'YES' if passed_failure_x else 'no'}."
+                f"Beat the run's furthest progress (frontier x={self.frontier_x()}): "
+                f"{'YES' if passed_frontier_x else 'no'}."
                 + (" The episode ended during this experiment (death or level end)." if ended_early else "")
             )
-            return {"ok": True, "text": text, "screenshot": shot, "passed_failure_x": passed_failure_x}
+            return {"ok": True, "text": text, "screenshot": shot, "passed_frontier_x": passed_frontier_x}
         except Exception as e:
             self._drop_env()
             return {"ok": False, "text": f"try_actions failed: {type(e).__name__}: {e}", "screenshot": None}
