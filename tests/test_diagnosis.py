@@ -237,6 +237,43 @@ class DiagnosisSessionTests(unittest.TestCase):
         self.assertEqual(experiment["act"], 1)
         self.assertEqual(experiment["hold_frames"], 30)
 
+    def test_try_action_sequence_plays_segments_and_records_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp)
+
+            result = session.try_action_sequence(
+                20,
+                [
+                    {"actions": "RIGHT", "frames": 20},   # x 360 -> 560
+                    {"actions": "RIGHT,B", "frames": 10},  # x 560 -> 660
+                ],
+            )
+
+        self.assertTrue(result["ok"], result["text"])
+        self.assertTrue(result["passed_frontier_x"])
+        self.assertIn("'RIGHT' x20 (from x=360", result["text"])
+        self.assertIn("'RIGHT,B' x10 (from x=560", result["text"])
+
+        self.assertEqual(len(session.verified_experiments), 1)
+        experiment = session.verified_experiments[0]
+        self.assertEqual(len(experiment["segments"]), 2)
+        self.assertEqual(experiment["segments"][0]["start_x"], 360)
+        self.assertEqual(experiment["segments"][1]["start_x"], 560)
+        self.assertEqual(experiment["max_x"], 660)
+
+    def test_try_action_sequence_rejects_empty_and_caps_totals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp)
+
+            self.assertFalse(session.try_action_sequence(20, [])["ok"])
+            self.assertFalse(session.try_action_sequence(20, ["not-a-dict"])["ok"])
+
+            result = session.try_action_sequence(
+                20, [{"actions": "RIGHT", "frames": 10_000}]
+            )
+            self.assertTrue(result["ok"])
+            self.assertIn("x600", result["text"])  # capped at SEQUENCE_MAX_FRAMES
+
     def test_try_actions_caps_hold_frames(self):
         with tempfile.TemporaryDirectory() as tmp:
             session, env = self.make_session(tmp)

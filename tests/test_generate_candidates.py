@@ -217,6 +217,40 @@ class GenerateCandidatesTests(unittest.TestCase):
         }
         self.assertIsNone(build_diagnosis_guard_candidate(working, experiment))
 
+    def test_build_diagnosis_guard_compiles_sequence_into_x_thresholds(self):
+        working = "def get_action(state):\n    return 'RIGHT'\n"
+        experiment = {
+            "zone": 0, "act": 1, "start_x": 2350, "max_x": 2600, "actions": "RIGHT",
+            "segments": [
+                {"actions": "RIGHT", "frames": 90, "start_x": 2350},
+                {"actions": "RIGHT,B", "frames": 40, "start_x": 2460},
+                {"actions": "RIGHT", "frames": 60, "start_x": 2530},
+            ],
+        }
+
+        candidate = build_diagnosis_guard_candidate(working, experiment)
+
+        self.assertIn("# DIAGNOSIS_GUARD zone=0 act=1 x=2350", candidate)
+        self.assertIn("2325 <= state.get(\"x_pos\", 0) < 2600", candidate)
+        # Threshold dispatch: later segments checked first, base action last.
+        self.assertIn('if state.get("x_pos", 0) >= 2530:', candidate)
+        self.assertIn('if state.get("x_pos", 0) >= 2460:', candidate)
+        self.assertIn('return "RIGHT,B"', candidate)
+        b_press = candidate.index('>= 2460')
+        landing = candidate.index('>= 2530')
+        self.assertLess(landing, b_press)  # furthest threshold first
+
+    def test_sequence_guard_requires_monotonic_segment_positions(self):
+        working = "def get_action(state):\n    return 'RIGHT'\n"
+        experiment = {
+            "zone": 0, "act": 1, "start_x": 2400, "max_x": 2600, "actions": "LEFT",
+            "segments": [
+                {"actions": "LEFT", "frames": 30, "start_x": 2400},
+                {"actions": "RIGHT,B", "frames": 60, "start_x": 2350},  # went backward
+            ],
+        }
+        self.assertIsNone(build_diagnosis_guard_candidate(working, experiment))
+
     def test_verified_experiment_takes_the_deterministic_slot(self):
         mutator = FakeMutator()
         experiments = [

@@ -196,12 +196,9 @@ def normalize_vision_context(content):
 DIAGNOSIS_MAX_TOOL_CALLS = 10
 
 DIAGNOSIS_SYSTEM_PROMPT = """You are a game-physics failure analyst with interactive control of a Sega Genesis emulator, paused around the moment a Sonic policy failed.
-PRIMARY GOAL: find, by experiment, an input that beats the run's furthest progress -- a try_actions result that says "Beat the run's furthest progress: YES". A verified escape is compiled directly into the next candidate policy, so it is worth more than any amount of description.
-- try_actions: run a counterfactual experiment. SPEND MOST OF YOUR BUDGET HERE. Each call independently rewinds and holds ONE button combination; vary both the input and the rewind distance:
-  * plain RIGHT from far back (maximum momentum)
-  * RIGHT,B at several different rewind offsets (jump timing matters)
-  * RIGHT,DOWN or DOWN,B (rolling/spindash through)
-  * UP,B or B alone (taller jump without pushing into the wall)
+PRIMARY GOAL: find, by experiment, an input that beats the run's furthest progress -- a result that says "Beat the run's furthest progress: YES". A verified escape is compiled directly into the next candidate policy, so it is worth more than any amount of description.
+- try_action_sequence: play TIMED SEGMENTS, e.g. [{"actions":"RIGHT","frames":90},{"actions":"RIGHT,B","frames":40}]. THIS IS USUALLY THE WINNING TOOL: Sonic's jump fires on the B PRESS, so a held "RIGHT,B" jumps exactly once at the start -- "build speed, THEN jump at the edge" is only expressible as a sequence. Vary run-up length to move the jump point.
+- try_actions: hold ONE combination for N frames (momentum tests: plain RIGHT from far back, RIGHT,DOWN rolling).
 - view_frame: look at the situation N frames before the failure (use sparingly; experiments teach more).
 When an experiment reports YES, or you are out of ideas, call finish_diagnosis with a concise report covering:
 1. What the obstacle/hazard actually is (from the screenshots).
@@ -253,6 +250,37 @@ DIAGNOSIS_TOOLS = [
                     },
                 },
                 "required": ["frames_before_failure", "actions", "hold_frames"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "try_action_sequence",
+            "description": (
+                "Counterfactual experiment with TIMED SEGMENTS: rewind to N frames before the failure, "
+                "then play each segment in order (e.g. build speed with RIGHT, then press RIGHT,B to "
+                "jump at the edge). Reports measured movement per segment and whether Sonic beat the "
+                "run's furthest progress, plus an end screenshot."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frames_before_failure": {"type": "integer"},
+                    "segments": {
+                        "type": "array",
+                        "description": "Up to 5 segments played in order; 600 frames total.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "actions": {"type": "string", "description": "Buttons held during this segment, e.g. 'RIGHT' or 'RIGHT,B'."},
+                                "frames": {"type": "integer", "description": "How many frames to hold this segment."},
+                            },
+                            "required": ["actions", "frames"],
+                        },
+                    },
+                },
+                "required": ["frames_before_failure", "segments"],
             },
         },
     },
@@ -513,6 +541,11 @@ def get_action(state):
                 args.get("frames_before_failure", 0),
                 str(args.get("actions", "")),
                 args.get("hold_frames", 60),
+            )
+        if name == "try_action_sequence":
+            return session.try_action_sequence(
+                args.get("frames_before_failure", 0),
+                args.get("segments", []),
             )
         return {"ok": False, "text": f"Unknown tool: {name}", "screenshot": None}
 

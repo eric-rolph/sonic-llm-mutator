@@ -22,6 +22,8 @@ from core.fsio import atomic_write_text
 SNAPSHOT_INTERVAL = 60        # frames between captures (~1 s at 60 fps)
 SNAPSHOT_CAPACITY = 10        # ring depth: ~10 s of history before failure
 TRY_ACTIONS_MAX_FRAMES = 300  # hard cap per counterfactual rollout (~5 s)
+SEQUENCE_MAX_SEGMENTS = 5     # segments per try_action_sequence experiment
+SEQUENCE_MAX_FRAMES = 600     # total frames per sequence experiment (~10 s)
 DEFAULT_WINDOW_DIR = "artifacts/diagnosis/window"
 DEFAULT_SCREENSHOT_DIR = "artifacts/diagnosis"
 
@@ -452,6 +454,95 @@ class DiagnosisSession:
         except Exception as e:
             self._drop_env()
             return {"ok": False, "text": f"try_actions failed: {type(e).__name__}: {e}", "screenshot": None}
+
+    def try_action_sequence(self, frames_before_failure, segments):
+        """Play a timed input sequence — the tool single holds cannot express.
+
+        Sonic's jump fires on the B *press*: a held "RIGHT,B" jumps once at
+        the start and never again, so "run, THEN jump at the edge" needs
+        segments. Segment boundary x positions are measured so a verified
+        sequence can compile into a stateless x-threshold guard.
+        """
+        snapshot = self._nearest_snapshot(frames_before_failure)
+        if snapshot is None:
+            return {"ok": False, "text": "No savestates are available in this window.", "screenshot": None}
+
+        normalized = []
+        total_frames = 0
+        for segment in list(segments or [])[:SEQUENCE_MAX_SEGMENTS]:
+            if not isinstance(segment, dict):
+                continue
+            try:
+                frames = max(1, int(segment.get("frames", 0)))
+            except (TypeError, ValueError):
+                continue
+            frames = min(frames, SEQUENCE_MAX_FRAMES - total_frames)
+            if frames <= 0:
+                break
+            normalized.append({"actions": str(segment.get("actions", "")), "frames": frames})
+            total_frames += frames
+        if not normalized:
+            return {"ok": False, "text": "No valid segments given. Each segment needs actions and frames.", "screenshot": None}
+
+        try:
+            env = self._seek(snapshot)
+            start = _info_subset(env.get_state())
+            max_x = start["x_pos"]
+            ended_early = False
+            played = []
+            for segment in normalized:
+                segment_start = _info_subset(env.get_state())
+                action = action_string_to_array(segment["actions"])
+                frames_done = 0
+                for _ in range(segment["frames"]):
+                    obs, reward, done, info = env.step(action)
+                    frames_done += 1
+                    max_x = max(max_x, _info_subset(env.get_state())["x_pos"])
+                    if done:
+                        ended_early = True
+                        break
+                played.append(
+                    {
+                        "actions": segment["actions"],
+                        "frames": frames_done,
+                        "start_x": segment_start["x_pos"],
+                        "start_y": segment_start["y_pos"],
+                    }
+                )
+                if ended_early:
+                    break
+
+            end = _info_subset(env.get_state())
+            shot = self._take_screenshot(env, f"seq_{snapshot['frame']}")
+            offset = self.failure_frame() - int(snapshot.get("frame", 0))
+            passed_frontier_x = max_x > self.frontier_x()
+            if passed_frontier_x and not ended_early:
+                self.verified_experiments.append(
+                    {
+                        "zone": start["zone"],
+                        "act": start["act"],
+                        "start_x": start["x_pos"],
+                        "actions": played[0]["actions"],
+                        "segments": played,
+                        "hold_frames": sum(p["frames"] for p in played),
+                        "max_x": max_x,
+                        "frames_before_failure": offset,
+                    }
+                )
+            steps_text = "; ".join(
+                f"'{p['actions']}' x{p['frames']} (from x={p['start_x']}, y={p['start_y']})" for p in played
+            )
+            text = (
+                f"Played sequence [{steps_text}] starting {offset} frames before the failure. "
+                f"x: {start['x_pos']} -> {end['x_pos']} (max {max_x}), y: {start['y_pos']} -> {end['y_pos']}. "
+                f"Beat the run's furthest progress (frontier x={self.frontier_x()}): "
+                f"{'YES — VERIFIED ESCAPE, this sequence will be compiled into a candidate policy' if passed_frontier_x else 'no'}."
+                + (" The episode ended during this experiment (death or level end)." if ended_early else "")
+            )
+            return {"ok": True, "text": text, "screenshot": shot, "passed_frontier_x": passed_frontier_x}
+        except Exception as e:
+            self._drop_env()
+            return {"ok": False, "text": f"try_action_sequence failed: {type(e).__name__}: {e}", "screenshot": None}
 
     def close(self):
         self._drop_env()
