@@ -135,7 +135,16 @@ def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
             and existing_act == str(act)
             and abs(int(existing_x) - start_x) <= x_radius * 2
         ):
-            return None
+            # A newer verified escape at the same spot SUPERSEDES the old
+            # guard (live-observed: a promoted x-threshold guard blocked its
+            # own frame-replay replacement, freezing iteration at the dip).
+            stripped = _strip_guard_block(
+                working_code,
+                f"# DIAGNOSIS_GUARD zone={existing_zone} act={existing_act} x={existing_x}",
+            )
+            if stripped is None:
+                return None  # guard was hand-mangled by a mutation; stay safe
+            working_code = stripped
 
     lower = start_x - x_radius
     # Apply the verified input through the measured traversal, then hand
@@ -203,6 +212,27 @@ def _valid_actions(actions):
     tokens = [t.strip().upper() for t in str(actions or "").split(",")]
     valid_tokens = [t for t in tokens if t in GENESIS_BUTTONS]
     return ",".join(valid_tokens) if valid_tokens else None
+
+
+def _strip_guard_block(code, marker_text, max_block_lines=40):
+    """Remove one generated guard block: its marker line through the blank
+    line every insertion appends. Returns None when the block no longer has
+    that shape (e.g. a mutation rewrote it), so callers can stay conservative.
+    """
+    lines = code.splitlines(keepends=True)
+    start = next(
+        (index for index, line in enumerate(lines) if line.strip() == marker_text),
+        None,
+    )
+    if start is None:
+        return None
+    for offset in range(1, max_block_lines + 1):
+        end = start + offset
+        if end >= len(lines):
+            return None
+        if lines[end].strip() == "":
+            return "".join(lines[:start] + lines[end + 1:])
+    return None
 
 
 def diagnosis_guard_marker(code):
