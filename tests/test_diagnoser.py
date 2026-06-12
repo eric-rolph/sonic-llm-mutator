@@ -46,6 +46,7 @@ class FakeSession:
     def __init__(self, tmp):
         self.calls = []
         self.last_screenshot = None
+        self.verified_experiments = []
         self._tmp = tmp
         self._shots = 0
 
@@ -70,6 +71,9 @@ class FakeSession:
 
     def try_actions(self, frames_before_failure, actions, hold_frames):
         self.calls.append(("try_actions", frames_before_failure, actions, hold_frames))
+        self.verified_experiments.append(
+            {"zone": 0, "act": 1, "start_x": 2404, "max_x": 2520, "actions": actions}
+        )
         return {
             "ok": True,
             "text": f"Held '{actions}': progressed past the failure x: YES.",
@@ -117,6 +121,9 @@ class DiagnoseFailureTests(unittest.TestCase):
         )
         self.assertIsNotNone(result["evidence_screenshot"])
         self.assertIn(("try_actions", 120, "RIGHT,B", 40), session.calls)
+        # Verified escapes travel with the result for guard compilation.
+        self.assertEqual(len(result["verified_experiments"]), 1)
+        self.assertEqual(result["verified_experiments"][0]["actions"], "RIGHT,B")
 
         # Second request must contain the assistant tool-call echo, the tool
         # result, and a follow-up user message carrying the screenshot.

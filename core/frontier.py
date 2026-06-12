@@ -9,6 +9,7 @@ path around full-policy rewrites that would regress earlier acts.
 import ast
 import re
 
+from core.actions import GENESIS_BUTTONS
 from core.policy_validator import validate_policy_source
 
 
@@ -78,6 +79,134 @@ def build_frontier_guard_candidate(working_code, trace, sample_count=3, x_radius
 
 def frontier_guard_marker(code):
     match = re.search(r"# FRONTIER_GUARD zone=\S+ act=\S+ x=-?\d+", code or "")
+    return match.group(0) if match else None
+
+
+def _insert_guard_lines(working_code, guard_body_lines):
+    """Insert guard lines at the top of get_action, preserving indentation."""
+    try:
+        tree = ast.parse(working_code)
+        function = next(
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "get_action"
+        )
+        first_body_line = function.body[0].lineno - 1
+    except (SyntaxError, StopIteration, IndexError):
+        return None
+
+    lines = working_code.splitlines(keepends=True)
+    indent = lines[first_body_line][:len(lines[first_body_line]) - len(lines[first_body_line].lstrip())]
+    guard = [f"{indent}{line}\n" for line in guard_body_lines] + ["\n"]
+    candidate = "".join(lines[:first_body_line] + guard + lines[first_body_line:])
+    try:
+        validate_policy_source(candidate)
+    except Exception:
+        return None
+    return candidate
+
+
+def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
+    """Compile a VERIFIED diagnosis experiment into a mechanical guard.
+
+    The diagnosis session *measured* that holding ``actions`` from around
+    ``start_x`` beat the run's frontier. Injecting exactly that input over the
+    verified traversal range removes the riskiest step — trusting an LLM to
+    translate its own finding into code — from the loop.
+    """
+    if not isinstance(experiment, dict):
+        return None
+    try:
+        zone = int(experiment["zone"])
+        act = int(experiment["act"])
+        start_x = int(experiment["start_x"])
+        max_x = int(experiment["max_x"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if max_x <= start_x:
+        return None
+
+    marker = f"# DIAGNOSIS_GUARD zone={zone} act={act} x={start_x}"
+    for existing_zone, existing_act, existing_x in re.findall(
+        r"# DIAGNOSIS_GUARD zone=(\S+) act=(\S+) x=(-?\d+)",
+        working_code,
+    ):
+        if (
+            existing_zone == str(zone)
+            and existing_act == str(act)
+            and abs(int(existing_x) - start_x) <= x_radius * 2
+        ):
+            return None
+
+    lower = start_x - x_radius
+    # Apply the verified input through the measured traversal, then hand
+    # control back to the existing policy at the new frontier.
+    upper = max_x
+    head = [
+        marker,
+        "if (",
+        f"    state.get(\"zone\") == {zone!r}",
+        f"    and state.get(\"act\") == {act!r}",
+        f"    and {lower} <= state.get(\"x_pos\", 0) < {upper}",
+        "):",
+    ]
+
+    segments = experiment.get("segments") or []
+    if len(segments) >= 2:
+        # Compile a timed sequence as FRAME REPLAY anchored on the first
+        # crossing of the sequence's start x. The deterministic emulator and
+        # unchanged approach code reproduce the arrival state, so replaying
+        # the measured frame counts is faithful — unlike x-threshold dispatch,
+        # which live testing showed releases B after the few frames it takes
+        # to cross a band, turning the verified full jump into a short hop.
+        cleaned = []
+        for segment in segments:
+            seg_actions = _valid_actions(segment.get("actions") if isinstance(segment, dict) else None)
+            try:
+                seg_frames = max(1, int(segment["frames"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+            if seg_actions is None:
+                return None
+            cleaned.append((seg_frames, seg_actions))
+        total_frames = sum(frames for frames, _ in cleaned)
+
+        counter = f"_DIAG_REPLAY_{zone}_{act}_{start_x}"
+        body = [
+            f"global {counter}",
+            f"if {counter!r} not in globals():",
+            f"    {counter} = -1",
+            "if (",
+            f"    state.get(\"zone\") == {zone!r}",
+            f"    and state.get(\"act\") == {act!r}",
+            f"    and {counter} < {total_frames}",
+            f"    and ({counter} >= 0 or {lower} <= state.get(\"x_pos\", 0) <= {start_x + x_radius})",
+            "):",
+            f"    {counter} = {counter} + 1",
+        ]
+        threshold = 0
+        for seg_frames, seg_actions in cleaned[:-1]:
+            threshold += seg_frames
+            body.append(f"    if {counter} < {threshold}:")
+            body.append(f"        return \"{seg_actions}\"")
+        body.append(f"    return \"{cleaned[-1][1]}\"")
+        guard_lines = [marker] + body
+        return _insert_guard_lines(working_code, guard_lines)
+
+    actions = _valid_actions(experiment.get("actions"))
+    if actions is None:
+        return None
+    return _insert_guard_lines(working_code, head + [f"    return \"{actions}\""])
+
+
+def _valid_actions(actions):
+    """Keep only valid Genesis buttons — exactly what the emulator held."""
+    tokens = [t.strip().upper() for t in str(actions or "").split(",")]
+    valid_tokens = [t for t in tokens if t in GENESIS_BUTTONS]
+    return ",".join(valid_tokens) if valid_tokens else None
+
+
+def diagnosis_guard_marker(code):
+    match = re.search(r"# DIAGNOSIS_GUARD zone=\S+ act=\S+ x=-?\d+", code or "")
     return match.group(0) if match else None
 
 

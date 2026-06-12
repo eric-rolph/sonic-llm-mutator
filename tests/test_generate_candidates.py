@@ -4,7 +4,12 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from main import build_frontier_guard_candidate, generate_candidates, load_pool_codes
+from main import (
+    build_diagnosis_guard_candidate,
+    build_frontier_guard_candidate,
+    generate_candidates,
+    load_pool_codes,
+)
 
 
 class FakeMutator:
@@ -168,6 +173,153 @@ class GenerateCandidatesTests(unittest.TestCase):
 
         self.assertEqual(selector_calls, [True])
         self.assertEqual(mutator.parent_pairs, [("# archived parent a", "# archived parent b")])
+
+    def test_build_diagnosis_guard_compiles_verified_experiment_into_code(self):
+        working = "def get_action(state):\n    return 'RIGHT,DOWN'\n"
+        experiment = {
+            "zone": 0, "act": 1, "start_x": 2404, "max_x": 2520,
+            "actions": "RIGHT,B", "hold_frames": 120,
+        }
+
+        candidate = build_diagnosis_guard_candidate(working, experiment)
+
+        self.assertIn("# DIAGNOSIS_GUARD zone=0 act=1 x=2404", candidate)
+        self.assertIn('return "RIGHT,B"', candidate)
+        self.assertIn("2379 <= state.get(\"x_pos\", 0) < 2520", candidate)
+        self.assertIn("return 'RIGHT,DOWN'", candidate)  # original preserved
+
+    def test_build_diagnosis_guard_rejects_malformed_and_non_improving(self):
+        working = "def get_action(state):\n    return 'RIGHT'\n"
+        self.assertIsNone(build_diagnosis_guard_candidate(working, None))
+        self.assertIsNone(build_diagnosis_guard_candidate(working, {"zone": 0}))
+        self.assertIsNone(
+            build_diagnosis_guard_candidate(
+                working,
+                {"zone": 0, "act": 1, "start_x": 100, "max_x": 100, "actions": "RIGHT"},
+            )
+        )
+        self.assertIsNone(
+            build_diagnosis_guard_candidate(
+                working,
+                {"zone": 0, "act": 1, "start_x": 100, "max_x": 200, "actions": "; import os"},
+            )
+        )
+
+    def test_build_diagnosis_guard_does_not_shadow_overlapping_guard(self):
+        working = """def get_action(state):
+    # DIAGNOSIS_GUARD zone=0 act=1 x=2400
+    if 2375 <= state.get("x_pos", 0) < 2500:
+        return "RIGHT,B"
+    return "RIGHT"
+"""
+        experiment = {
+            "zone": 0, "act": 1, "start_x": 2410, "max_x": 2600, "actions": "RIGHT,B",
+        }
+        self.assertIsNone(build_diagnosis_guard_candidate(working, experiment))
+
+    def test_build_diagnosis_guard_compiles_sequence_as_frame_replay(self):
+        working = "def get_action(state):\n    return 'RIGHT'\n"
+        experiment = {
+            "zone": 0, "act": 1, "start_x": 2350, "max_x": 2600, "actions": "RIGHT",
+            "segments": [
+                {"actions": "RIGHT", "frames": 90, "start_x": 2350},
+                {"actions": "RIGHT,B", "frames": 40, "start_x": 2460},
+                {"actions": "RIGHT", "frames": 60, "start_x": 2530},
+            ],
+        }
+
+        candidate = build_diagnosis_guard_candidate(working, experiment)
+
+        self.assertIn("# DIAGNOSIS_GUARD zone=0 act=1 x=2350", candidate)
+        # Replay anchors on the first crossing of the start x...
+        self.assertIn("2325 <= state.get(\"x_pos\", 0) <= 2375", candidate)
+        # ...then plays the measured frame counts: jump segment holds B for
+        # its full 40 frames (x-thresholds released it after a few frames,
+        # turning a verified full jump into a short hop).
+        self.assertIn("global _DIAG_REPLAY_0_1_2350", candidate)
+        self.assertIn("if _DIAG_REPLAY_0_1_2350 < 90:", candidate)
+        self.assertIn("if _DIAG_REPLAY_0_1_2350 < 130:", candidate)
+        self.assertIn('return "RIGHT,B"', candidate)
+        self.assertIn("_DIAG_REPLAY_0_1_2350 < 190", candidate)  # total budget
+        # The compiled candidate must still load in the restricted runtime.
+        from core.policy_validator import validate_policy_source
+        validate_policy_source(candidate)
+
+    def test_sequence_guard_compiles_backward_runups_too(self):
+        # Frame replay does not need x-monotonic boundaries, so back-up-then-
+        # charge sequences (the longer-runway strategy) compile as well.
+        working = "def get_action(state):\n    return 'RIGHT'\n"
+        experiment = {
+            "zone": 0, "act": 1, "start_x": 2400, "max_x": 2600, "actions": "LEFT",
+            "segments": [
+                {"actions": "LEFT", "frames": 30, "start_x": 2400},
+                {"actions": "RIGHT,B", "frames": 60, "start_x": 2350},
+            ],
+        }
+
+        candidate = build_diagnosis_guard_candidate(working, experiment)
+
+        self.assertIsNotNone(candidate)
+        self.assertIn('return "LEFT"', candidate)
+        self.assertIn('return "RIGHT,B"', candidate)
+
+    def test_verified_experiment_takes_the_deterministic_slot(self):
+        mutator = FakeMutator()
+        experiments = [
+            {"zone": 0, "act": 1, "start_x": 2404, "max_x": 2520, "actions": "RIGHT,B"},
+            {"zone": 0, "act": 1, "start_x": 2300, "max_x": 2600, "actions": "DOWN,B"},
+        ]
+        # A stationary trace that would normally produce a frontier guard --
+        # the verified experiment must win the slot.
+        trace = [
+            {"zone": 0, "act": 1, "x": 1077, "x_velocity": 0.0, "action": "RIGHT,DOWN"},
+        ] * 3
+
+        result = generate_silently(
+            mutator,
+            "def get_action(state):\n    return 'RIGHT,DOWN'\n",
+            "stuck",
+            None,
+            [],
+            trace,
+            2,
+            [],
+            crossover_probability=0.0,
+            verified_experiments=experiments,
+        )
+
+        code, reasoning = result[0]
+        self.assertEqual(reasoning, "Diagnosed guard (verified input)")
+        # The furthest-reaching experiment (max_x 2600) wins.
+        self.assertIn("# DIAGNOSIS_GUARD zone=0 act=1 x=2300", code)
+        self.assertIn('return "DOWN,B"', code)
+        self.assertEqual(mutator.mutate_calls, 1)  # only one LLM slot left
+
+    def test_recently_attempted_diagnosis_guard_is_not_retried(self):
+        mutator = FakeMutator()
+        experiments = [
+            {"zone": 0, "act": 1, "start_x": 2404, "max_x": 2520, "actions": "RIGHT,B"},
+        ]
+        recent = [
+            {"components": {"frontier_guard_markers": ["# DIAGNOSIS_GUARD zone=0 act=1 x=2404"]}}
+        ]
+
+        result = generate_silently(
+            mutator,
+            "def get_action(state):\n    return 'RIGHT'\n",
+            "stuck",
+            None,
+            recent,
+            [],
+            2,
+            [],
+            crossover_probability=0.0,
+            verified_experiments=experiments,
+        )
+
+        reasons = [reasoning for _code, reasoning in result]
+        self.assertNotIn("Diagnosed guard (verified input)", reasons)
+        self.assertEqual(mutator.mutate_calls, 2)
 
     def test_diagnosis_report_is_forwarded_to_mutations(self):
         mutator = FakeMutator()

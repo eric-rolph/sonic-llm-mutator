@@ -80,6 +80,42 @@ class FailureSnapshotRingTests(unittest.TestCase):
         self.assertFalse(ring.record(env, 100, env.get_state()))
         self.assertEqual(ring.snapshots, [])
 
+    def test_authoritative_act_max_x_wins_over_stale_raw_x(self):
+        # The settle window: frames tagged act=1 can still report Act 1's x.
+        # When the evaluator supplies its per-act max, the ring must trust it
+        # over anything derived from raw x_pos.
+        env = FakeSavestateEnv()
+        ring = FailureSnapshotRing(interval=60, capacity=10)
+
+        ring.record(env, 0, {"x_pos": 9767, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3}, act_max_x=0)
+        ring.record(env, 60, {"x_pos": 2478, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3}, act_max_x=2478)
+        ring.record(env, 120, {"x_pos": 2191, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3}, act_max_x=2478)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ring.persist(tmp, failure_reason="stuck", failure_frame=120)
+            window = load_failure_window(tmp)
+
+        self.assertEqual(window["failure"]["frontier_x"], 2478)
+
+    def test_frontier_x_resets_on_act_transition(self):
+        # Live-observed bug: the baseline cleared Act 1 at x~9767, then failed
+        # in Act 2 at x~2478 — and real Act-2 escapes (x=3418) were judged
+        # against the phantom Act-1 frontier. The frontier must be per-act.
+        env = FakeSavestateEnv()
+        ring = FailureSnapshotRing(interval=60, capacity=10)
+
+        ring.record(env, 0, {"x_pos": 9000, "y_pos": 1, "zone": 0, "act": 0, "rings": 0, "lives": 3})
+        ring.record(env, 60, {"x_pos": 9767, "y_pos": 1, "zone": 0, "act": 0, "rings": 0, "lives": 3})
+        ring.record(env, 120, {"x_pos": 100, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3})
+        ring.record(env, 180, {"x_pos": 2478, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3})
+        ring.record(env, 240, {"x_pos": 2191, "y_pos": 1, "zone": 0, "act": 1, "rings": 0, "lives": 3})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ring.persist(tmp, failure_reason="stuck", failure_frame=240)
+            window = load_failure_window(tmp)
+
+        self.assertEqual(window["failure"]["frontier_x"], 2478)
+
     def test_persist_and_load_round_trip(self):
         env = FakeSavestateEnv()
         ring = self.fill_ring(env, [0, 60, 120])
@@ -220,6 +256,59 @@ class DiagnosisSessionTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["passed_frontier_x"])
         self.assertIn("frontier x=1000", result["text"])
+
+    def test_verified_escapes_are_recorded_for_guard_compilation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp)
+
+            session.try_actions(20, "RIGHT", 30)  # x 360 -> 660, beats 400
+            session.try_actions(20, "DOWN", 30)   # stalls, no escape
+
+        self.assertEqual(len(session.verified_experiments), 1)
+        experiment = session.verified_experiments[0]
+        self.assertEqual(experiment["actions"], "RIGHT")
+        self.assertEqual(experiment["start_x"], 360)
+        self.assertEqual(experiment["max_x"], 660)
+        self.assertEqual(experiment["zone"], 0)
+        self.assertEqual(experiment["act"], 1)
+        self.assertEqual(experiment["hold_frames"], 30)
+
+    def test_try_action_sequence_plays_segments_and_records_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp)
+
+            result = session.try_action_sequence(
+                20,
+                [
+                    {"actions": "RIGHT", "frames": 20},   # x 360 -> 560
+                    {"actions": "RIGHT,B", "frames": 10},  # x 560 -> 660
+                ],
+            )
+
+        self.assertTrue(result["ok"], result["text"])
+        self.assertTrue(result["passed_frontier_x"])
+        self.assertIn("'RIGHT' x20 (from x=360", result["text"])
+        self.assertIn("'RIGHT,B' x10 (from x=560", result["text"])
+
+        self.assertEqual(len(session.verified_experiments), 1)
+        experiment = session.verified_experiments[0]
+        self.assertEqual(len(experiment["segments"]), 2)
+        self.assertEqual(experiment["segments"][0]["start_x"], 360)
+        self.assertEqual(experiment["segments"][1]["start_x"], 560)
+        self.assertEqual(experiment["max_x"], 660)
+
+    def test_try_action_sequence_rejects_empty_and_caps_totals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session, env = self.make_session(tmp)
+
+            self.assertFalse(session.try_action_sequence(20, [])["ok"])
+            self.assertFalse(session.try_action_sequence(20, ["not-a-dict"])["ok"])
+
+            result = session.try_action_sequence(
+                20, [{"actions": "RIGHT", "frames": 10_000}]
+            )
+            self.assertTrue(result["ok"])
+            self.assertIn("x600", result["text"])  # capped at SEQUENCE_MAX_FRAMES
 
     def test_try_actions_caps_hold_frames(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,17 @@
 def get_action(state):
     # FRONTIER_GUARD zone=0 act=1 x=1077
+    # DIAGNOSIS_GUARD zone=0 act=1 x=2404
+    if (
+        state.get("zone") == 0
+        and state.get("act") == 1
+        and 2379 <= state.get("x_pos", 0) < 3326
+    ):
+        if state.get("x_pos", 0) >= 2498:
+            return "RIGHT"
+        if state.get("x_pos", 0) >= 2453:
+            return "RIGHT,B"
+        return "RIGHT"
+
     if (
         state.get("zone") == 0
         and state.get("act") == 1

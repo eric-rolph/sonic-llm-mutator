@@ -190,17 +190,20 @@ def normalize_vision_context(content):
 
 
 # --- Agentic failure diagnosis -------------------------------------------
-# Hard ceiling on model-initiated emulator operations per diagnosis.
-DIAGNOSIS_MAX_TOOL_CALLS = 6
+# Hard ceiling on model-initiated emulator operations per diagnosis. One
+# diagnosis is cached for the whole life of a frontier, so a thorough hunt
+# amortizes across every stagnant generation that follows.
+DIAGNOSIS_MAX_TOOL_CALLS = 10
 
 DIAGNOSIS_SYSTEM_PROMPT = """You are a game-physics failure analyst with interactive control of a Sega Genesis emulator, paused around the moment a Sonic policy failed.
-Use the tools to find out WHY the failure happened and WHAT INPUT avoids it:
-- view_frame: look at the situation N frames before the failure.
-- try_actions: actually run a counterfactual experiment (e.g. "would holding RIGHT,B from 120 frames earlier clear the obstacle?"). A VERIFIED working input is the most valuable possible finding -- prefer experiments over speculation.
-You have a small tool budget; be economical. When confident, call finish_diagnosis with a concise report covering:
+PRIMARY GOAL: find, by experiment, an input that beats the run's furthest progress -- a result that says "Beat the run's furthest progress: YES". A verified escape is compiled directly into the next candidate policy, so it is worth more than any amount of description.
+- try_action_sequence: play TIMED SEGMENTS, e.g. [{"actions":"RIGHT","frames":90},{"actions":"RIGHT,B","frames":40}]. THIS IS USUALLY THE WINNING TOOL: Sonic's jump fires on the B PRESS, so a held "RIGHT,B" jumps exactly once at the start -- "build speed, THEN jump at the edge" is only expressible as a sequence. Vary run-up length to move the jump point. IMPORTANT: every rewind point lies on the FAILING run's own path, so Sonic arrives with the same losing momentum -- if forward attempts keep falling short, back up first to build a longer runway (e.g. [{"actions":"LEFT","frames":90},{"actions":"RIGHT","frames":150},{"actions":"RIGHT,B","frames":40}]).
+- try_actions: hold ONE combination for N frames (momentum tests: plain RIGHT from far back, RIGHT,DOWN rolling).
+- view_frame: look at the situation N frames before the failure (use sparingly; experiments teach more).
+When an experiment reports YES, or you are out of ideas, call finish_diagnosis with a concise report covering:
 1. What the obstacle/hazard actually is (from the screenshots).
 2. The earliest state cue that predicts it (x range, velocity pattern, vision context).
-3. Which input sequences you VERIFIED work or fail, with their measured outcomes.
+3. Which inputs you VERIFIED work or fail, with their measured outcomes.
 4. A concrete recommendation for the policy code."""
 
 DIAGNOSIS_TOOLS = [
@@ -247,6 +250,37 @@ DIAGNOSIS_TOOLS = [
                     },
                 },
                 "required": ["frames_before_failure", "actions", "hold_frames"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "try_action_sequence",
+            "description": (
+                "Counterfactual experiment with TIMED SEGMENTS: rewind to N frames before the failure, "
+                "then play each segment in order (e.g. build speed with RIGHT, then press RIGHT,B to "
+                "jump at the edge). Reports measured movement per segment and whether Sonic beat the "
+                "run's furthest progress, plus an end screenshot."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "frames_before_failure": {"type": "integer"},
+                    "segments": {
+                        "type": "array",
+                        "description": "Up to 5 segments played in order; 600 frames total.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "actions": {"type": "string", "description": "Buttons held during this segment, e.g. 'RIGHT' or 'RIGHT,B'."},
+                                "frames": {"type": "integer", "description": "How many frames to hold this segment."},
+                            },
+                            "required": ["actions", "frames"],
+                        },
+                    },
+                },
+                "required": ["frames_before_failure", "segments"],
             },
         },
     },
@@ -508,6 +542,11 @@ def get_action(state):
                 str(args.get("actions", "")),
                 args.get("hold_frames", 60),
             )
+        if name == "try_action_sequence":
+            return session.try_action_sequence(
+                args.get("frames_before_failure", 0),
+                args.get("segments", []),
+            )
         return {"ok": False, "text": f"Unknown tool: {name}", "screenshot": None}
 
     def diagnose_failure(self, session, failure_reason, coordinate_trace=None, max_tool_calls=DIAGNOSIS_MAX_TOOL_CALLS):
@@ -578,7 +617,11 @@ def get_action(state):
                 report = message_text(message)
                 if not report:
                     raise ValueError("Diagnosis model returned an empty report.")
-                return {"report": report, "evidence_screenshot": session.last_screenshot}
+                return {
+                    "report": report,
+                    "evidence_screenshot": session.last_screenshot,
+                    "verified_experiments": list(getattr(session, "verified_experiments", [])),
+                }
 
             messages.append(
                 {
@@ -613,15 +656,26 @@ def get_action(state):
                     report = str(args.get("report", "")).strip() or message_text(message)
                     if not report:
                         raise ValueError("finish_diagnosis was called without a report.")
-                    return {"report": report, "evidence_screenshot": session.last_screenshot}
+                    return {
+                        "report": report,
+                        "evidence_screenshot": session.last_screenshot,
+                        "verified_experiments": list(getattr(session, "verified_experiments", [])),
+                    }
 
                 result = self._dispatch_diagnosis_tool(session, call.function.name, args)
                 # One line per tool call so the operator can watch the
                 # investigation progress (and spot broken tools immediately).
-                outcome = "ok" if result.get("ok") else "ERROR"
+                # The verdict lives at the END of experiment texts, so log the
+                # tail as well as the head.
+                if result.get("ok"):
+                    outcome = "VERIFIED ESCAPE" if result.get("passed_frontier_x") else "ok"
+                else:
+                    outcome = "ERROR"
+                text = str(result.get("text", ""))
+                summary = text[:110] + (" ... " + text[-90:] if len(text) > 200 else "")
                 print(
                     f"  diagnosis: {call.function.name}({json.dumps(args, sort_keys=True)}) "
-                    f"-> {outcome}: {str(result.get('text', ''))[:120]}"
+                    f"-> {outcome}: {summary}"
                 )
                 messages.append(
                     {
