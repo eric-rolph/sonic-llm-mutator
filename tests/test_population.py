@@ -205,6 +205,24 @@ class PopulationArchiveTests(unittest.TestCase):
         self.assertEqual(details["components"], {"distance": 50})
         self.assertEqual(details["reasoning"], "legacy reasoning")
 
+    def test_select_parent_codes_floors_out_degenerate_ancestors(self):
+        # Live runs: the exploration bonus kept resurrecting ~2k-fitness
+        # ancestors against a 54k champion; their offspring died instantly.
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = PopulationArchive(tmp)
+            archive.record_evaluation(policy_returning("RIGHT"), fitness=54000.0)
+            archive.record_evaluation(policy_returning("RIGHT,B"), fitness=50000.0)
+            degenerate = archive.record_evaluation(policy_returning("LEFT"), fitness=2000.0)
+
+            for seed in range(10):
+                parents = archive.select_parent_codes(rng=random.Random(seed))
+                self.assertIsNotNone(parents)
+                self.assertNotIn(policy_returning("LEFT"), parents)
+
+            records = archive.load_records()
+            visits = {record["policy_id"]: record["selection_visits"] for record in records}
+            self.assertEqual(visits[degenerate["policy_id"]], 0)
+
     def test_select_parent_codes_does_not_record_visits_without_two_valid_parents(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = PopulationArchive(tmp)

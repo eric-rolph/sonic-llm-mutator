@@ -24,6 +24,23 @@ def _top_level_functions(source):
     }
 
 
+def _function_uses_global_state(node):
+    """True for functions copying the policies' global-state idiom.
+
+    Champions carry injected guard blocks built on ``global`` /
+    ``globals()``; extraction routinely copies them into skills, where the
+    stricter skills validator rejects the WHOLE library (live-observed: the
+    skill library stopped learning after the first guard promotion). Such
+    functions are dropped individually instead.
+    """
+    for child in ast.walk(node):
+        if isinstance(child, ast.Global):
+            return True
+        if isinstance(child, ast.Name) and child.id == "globals":
+            return True
+    return False
+
+
 def extract_json_object(text):
     """Extract the first valid JSON object from raw or fenced model output."""
     if not text:
@@ -815,12 +832,22 @@ Return ONLY valid Python code containing the updated skill library (the existing
 
                 new_ast = ast.parse(new_skills_code)
                 added_funcs_code = []
+                dropped_global_state = []
                 for node in new_ast.body:
                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         if node.name not in existing_functions:
+                            if _function_uses_global_state(node):
+                                dropped_global_state.append(node.name)
+                                continue
                             source = ast.get_source_segment(new_skills_code, node)
                             if source:
                                 added_funcs_code.append(source)
+                if dropped_global_state:
+                    print(
+                        "Note: dropped extracted skills that copy the policy's "
+                        "global-state idiom (not allowed in the skills library): "
+                        + ", ".join(sorted(dropped_global_state))
+                    )
 
                 changed_functions = {
                     name

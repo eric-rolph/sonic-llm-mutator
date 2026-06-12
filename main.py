@@ -158,12 +158,26 @@ def persist_diagnosis_report(result, failure_reason, report_path=DIAGNOSIS_REPOR
         print(f"Failed to persist diagnosis report: {e}")
 
 
-def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, session_factory=None, report_path=DIAGNOSIS_REPORT_PATH):
-    """Run agentic diagnosis on the frontier once; reuse while it is unchanged.
+REDIAGNOSE_AFTER_STAGNANT_GENERATIONS = 3
 
-    Returns ``{"report", "evidence_screenshot"}`` or ``None``. The cache also
-    remembers failed attempts so a broken diagnosis setup is not retried every
-    generation until the frontier actually changes.
+
+def maybe_diagnose_frontier(
+    mutator,
+    frontier,
+    cache,
+    emulator_available=True,
+    session_factory=None,
+    report_path=DIAGNOSIS_REPORT_PATH,
+    stagnation_counter=0,
+):
+    """Run agentic diagnosis on the frontier; reuse while it is unchanged.
+
+    Returns ``{"report", "evidence_screenshot", "verified_experiments"}`` or
+    ``None``. The cache also remembers failed attempts so a broken diagnosis
+    setup is not retried every generation — but a frontier that stays stuck
+    for ``REDIAGNOSE_AFTER_STAGNANT_GENERATIONS`` more generations gets a
+    fresh experiment budget (live-observed: one no-escape diagnosis froze the
+    investigation for the rest of the run while mutations stayed flat).
     """
     if not emulator_available or os.environ.get("SONIC_AGENTIC_DIAGNOSIS", "1") == "0":
         return None
@@ -176,7 +190,14 @@ def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, s
 
     key = window_key(window)
     if cache.get("key") == key:
-        return cache.get("result")
+        stagnated_since = stagnation_counter - cache.get("stagnation_counter", 0)
+        found_escape = bool((cache.get("result") or {}).get("verified_experiments"))
+        if found_escape or stagnated_since < REDIAGNOSE_AFTER_STAGNANT_GENERATIONS:
+            return cache.get("result")
+        print(
+            f"Frontier still stuck after {stagnated_since} more generations; "
+            "re-running agentic diagnosis with a fresh experiment budget."
+        )
 
     session = None
     try:
@@ -199,6 +220,7 @@ def maybe_diagnose_frontier(mutator, frontier, cache, emulator_available=True, s
 
     cache["key"] = key
     cache["result"] = result
+    cache["stagnation_counter"] = stagnation_counter
     return result
 
 
@@ -613,7 +635,11 @@ def run_evaluation_loop(
         # Diagnose the frontier once per generation (cached while unchanged):
         # the vision model replays the failure and experiments with inputs.
         diagnosis = maybe_diagnose_frontier(
-            mutator, mutation_frontier, diagnosis_cache, emulator_available=env is not None
+            mutator,
+            mutation_frontier,
+            diagnosis_cache,
+            emulator_available=env is not None,
+            stagnation_counter=stagnation_counter,
         )
         diagnosis_report = diagnosis.get("report") if diagnosis else None
         evidence_screenshot = diagnosis.get("evidence_screenshot") if diagnosis else None
