@@ -70,6 +70,52 @@ def extract_json_object(text):
     return None
 
 
+def _defines_get_action(code):
+    """True if ``code`` parses as Python and defines a top-level get_action."""
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return False
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "get_action"
+        for node in tree.body
+    )
+
+
+def extract_policy_code(raw_response):
+    """Pull the policy source out of a (possibly reasoning-model) response.
+
+    Reasoning models such as Gemma emit several fenced blocks in their
+    scratchpad -- partial drafts, the final version, sometimes a state-dict
+    example. The old heuristic took the *last* fenced block unconditionally,
+    which on a reasoning model frequently grabbed a truncated draft and produced
+    a SyntaxError. Instead, return the last fenced block that actually parses and
+    defines a top-level ``get_action``; only if none qualifies fall back to the
+    previous last-block/raw behavior so the validator + repair path still runs.
+    """
+    if not raw_response:
+        return ""
+
+    blocks = [b.strip() for b in re.findall(r"```(?:python)?\s*\n?(.*?)```", raw_response, re.DOTALL)]
+    blocks = [b for b in blocks if b]
+
+    # Best: the last fenced block that is a complete, parseable policy.
+    for block in reversed(blocks):
+        if _defines_get_action(block):
+            return block
+
+    # Next: the response may be bare code with no fences at all.
+    stripped = raw_response.strip()
+    if _defines_get_action(stripped):
+        return stripped
+
+    # Fallback: keep the previous heuristic so downstream validation/repair gets
+    # *something* rather than silently dropping the model's output.
+    if blocks:
+        return blocks[-1]
+    return stripped
+
+
 # Hard cap on stored lessons; oldest entries are dropped beyond this.
 MAX_SEMANTIC_LESSONS = 100
 
@@ -990,15 +1036,8 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         else:
             raw_response, reasoning = self._call_macro_model(prompt, screenshot_path, temperature)
 
-        # Clean up markdown if the LLM wrapped it anyway
         print(f"Raw Response from LLM (mutate): {repr(raw_response)}")
-        if "```python" in raw_response:
-            raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
-        elif "```" in raw_response:
-            parts = raw_response.split("```")
-            raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
-
-        return raw_response, reasoning
+        return extract_policy_code(raw_response), reasoning
 
     def repair_policy(self, candidate_code, validation_error):
         """Use the local code model once to repair an exact validator failure."""
@@ -1059,10 +1098,4 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         reasoning = "FunSearch Crossover Offspring"
 
         print(f"Raw Response from LLM (crossover): {repr(raw_response)}")
-        if "```python" in raw_response:
-            raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
-        elif "```" in raw_response:
-            parts = raw_response.split("```")
-            raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
-
-        return raw_response, reasoning
+        return extract_policy_code(raw_response), reasoning
