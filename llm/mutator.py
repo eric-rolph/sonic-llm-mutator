@@ -10,6 +10,11 @@ import sys
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from core.frontier import (
+    build_llm_guard_candidate,
+    llm_guard_marker,
+    recently_attempted_frontier_guard,
+)
 from core.fsio import atomic_write_text
 from core.policy_validator import validate_skills_source
 from core.trace_context import trace_entry_x, trace_entry_zone_act
@@ -939,6 +944,83 @@ Return ONLY valid Python code containing the updated skill library (the existing
             except Exception as e:
                 print(f"Failed to save extracted skills: {e}")
 
+    def _request_guard_proposal(self, user_prompt, image_path, temperature):
+        """One raw model call returning a JSON guard proposal (not code).
+
+        Uses the vision model when a frame is available (a stuck frontier is a
+        visual problem), else the local code model. A dedicated system prompt is
+        needed because the normal SYSTEM_PROMPT asks for full policy code.
+        """
+        system = (
+            "You choose ONE controller input for a Sonic policy stuck at one spot. "
+            "Reply with ONLY a compact JSON object and nothing else."
+        )
+        use_vision = bool(image_path) and self.macro_client is not None
+        client = self.macro_client if use_vision else self.micro_client
+        model = self.macro_model if use_vision else self.micro_model
+        if use_vision:
+            user_content = [
+                {"type": "text", "text": user_prompt},
+                {"type": "image_url", "image_url": {"url": self._image_data_url(image_path)}},
+            ]
+        else:
+            user_content = user_prompt
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=temperature,
+            max_tokens=4096,  # reasoning models spend tokens before emitting the JSON
+            timeout=180,
+        )
+        return message_text(response.choices[0].message)
+
+    def _try_structured_guard(
+        self, current_code, failure_reason, screenshot_path, zone, act, x,
+        diagnosis_text, recent_history, temperature,
+    ):
+        """Ask for a structured {action, hold_frames} proposal and compile it
+        into a champion-preserving guard. Returns guard code, or None to fall
+        back to a full rewrite."""
+        prompt = f"""The working Sonic policy is STUCK and cannot get past one spot.
+
+Authoritative emulator state at the stall (from RAM -- exact, do not change):
+  zone={zone}, act={act}, x_pos={x}
+
+Failure: {failure_reason}
+{diagnosis_text}
+
+Look at the attached frame. Choose ONE input to try AT THAT SPOT to get Sonic moving forward past it.
+Reply with ONLY this JSON object (no prose, no code):
+{{"action": "<comma-separated buttons>", "hold_frames": <int 1-120>, "why": "<one short sentence>"}}
+
+Valid buttons: RIGHT, LEFT, UP, DOWN, B, A, C  (B is jump).
+Typical escapes: "RIGHT,B" (jump a wall/gap), "RIGHT,DOWN" (roll through), "RIGHT" (build speed), "RIGHT,UP,B" (higher jump).
+hold_frames: how long to hold it -- ~12 for a hop, ~25 for a full jump, ~40 to roll a stretch.
+
+[cache breaker {os.urandom(6).hex()}]"""
+        raw = self._request_guard_proposal(prompt, screenshot_path, temperature)
+        print(f"Structured guard proposal (raw): {repr(raw)[:200]}")
+        parsed = extract_json_object(raw)
+        if not isinstance(parsed, dict):
+            return None
+        proposal = {
+            "zone": zone,
+            "act": act,
+            "x": x,
+            "action": parsed.get("action") or parsed.get("actions"),
+            "hold_frames": parsed.get("hold_frames", 0),
+        }
+        guard = build_llm_guard_candidate(current_code, proposal)
+        if guard is None:
+            return None
+        if recently_attempted_frontier_guard(llm_guard_marker(guard), recent_history):
+            print("Structured guard already attempted recently; falling back to rewrite.")
+            return None
+        return guard
+
     def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None, diagnosis_report=None):
         history_text = json.dumps(recent_history, indent=2)
         diagnosis_text = ""
@@ -956,6 +1038,24 @@ Return ONLY valid Python code containing the updated skill library (the existing
             if len(coordinate_trace) > 0:
                 current_x = trace_entry_x(coordinate_trace[-1])
                 current_zone, current_act = trace_entry_zone_act(coordinate_trace[-1])
+
+        # Prefer a structured, champion-preserving guard: the model proposes only
+        # WHAT to try (buttons + hold duration); the coordinates stay authoritative
+        # and the working code is never rewritten, only extended. Fall back to a
+        # full rewrite when there is no frontier, the fault is a code timeout, or
+        # the proposal does not compile into a fresh guard.
+        if "timeout" not in failure_reason.lower() and current_zone is not None and current_act is not None:
+            try:
+                guard = self._try_structured_guard(
+                    current_code, failure_reason, screenshot_path,
+                    current_zone, current_act, current_x,
+                    diagnosis_text, recent_history, temperature,
+                )
+            except Exception as e:
+                print(f"Structured guard proposal failed ({e}); falling back to rewrite.")
+                guard = None
+            if guard is not None:
+                return guard, "LLM structured guard"
 
         lessons_text = ""
         if os.path.exists("memory/semantic_bank.json"):

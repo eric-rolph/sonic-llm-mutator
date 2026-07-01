@@ -32,6 +32,7 @@ from core.frontier import (
     build_frontier_guard_candidate,
     diagnosis_guard_marker,
     frontier_guard_marker,
+    llm_guard_marker,
     recently_attempted_frontier_guard,
 )
 from core.fsio import atomic_write_text
@@ -716,8 +717,16 @@ def run_evaluation_loop(
                     if candidate_bk2_path != latest_bk2:
                         os.rename(latest_bk2, candidate_bk2_path)
 
-            marker = frontier_guard_marker(new_code) or diagnosis_guard_marker(new_code)
-            if reasoning in ("Deterministic frontier guard", "Diagnosed guard (verified input)") and marker is not None:
+            marker = (
+                frontier_guard_marker(new_code)
+                or diagnosis_guard_marker(new_code)
+                or llm_guard_marker(new_code)
+            )
+            if reasoning in (
+                "Deterministic frontier guard",
+                "Diagnosed guard (verified input)",
+                "LLM structured guard",
+            ) and marker is not None:
                 components = dict(components)
                 components["frontier_guard_marker"] = marker
                 attempted_frontier_markers.add(marker)

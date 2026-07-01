@@ -240,6 +240,86 @@ def diagnosis_guard_marker(code):
     return match.group(0) if match else None
 
 
+def build_llm_guard_candidate(working_code, proposal, x_radius=25):
+    """Compile an UNVERIFIED structured model proposal into a preserving guard.
+
+    Unlike a free-form rewrite, a proposal can only PREPEND a narrow recovery
+    guard to the working policy; it can never regress the code that already
+    works. The model decides only WHAT to try (buttons, and optionally how many
+    frames to hold them); the WHERE (zone/act/x) comes from authoritative
+    emulator state, and the normal evaluation -- not the model -- confirms
+    whether it helps. Marked distinctly from a VERIFIED diagnosis guard so the
+    two never supersede each other.
+    """
+    if not isinstance(proposal, dict):
+        return None
+    try:
+        zone = int(proposal["zone"])
+        act = int(proposal["act"])
+        x = int(proposal["x"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    actions = _valid_actions(proposal.get("action", proposal.get("actions")))
+    if actions is None:
+        return None
+    try:
+        hold_frames = int(proposal.get("hold_frames", 0) or 0)
+    except (TypeError, ValueError):
+        hold_frames = 0
+    hold_frames = max(0, min(hold_frames, 300))
+
+    marker = f"# LLM_GUARD zone={zone} act={act} x={x}"
+    for existing_zone, existing_act, existing_x in re.findall(
+        r"# LLM_GUARD zone=(\S+) act=(\S+) x=(-?\d+)",
+        working_code,
+    ):
+        if (
+            existing_zone == str(zone)
+            and existing_act == str(act)
+            and abs(int(existing_x) - x) <= x_radius * 2
+        ):
+            return None
+
+    lower = x - x_radius
+    upper = x + x_radius
+    if hold_frames >= 1:
+        # Hold the proposed action for hold_frames once Sonic first reaches the
+        # band, mirroring the verified frame-replay guard (the deterministic
+        # emulator makes the replay faithful).
+        counter = "_LLM_REPLAY_" + f"{zone}_{act}_{x}".replace("-", "n")
+        body = [
+            marker,
+            f"global {counter}",
+            f"if {counter!r} not in globals():",
+            f"    {counter} = -1",
+            "if (",
+            f'    state.get("zone") == {zone!r}',
+            f'    and state.get("act") == {act!r}',
+            f"    and {counter} < {hold_frames}",
+            f'    and ({counter} >= 0 or {lower} <= state.get("x_pos", 0) <= {upper})',
+            "):",
+            f"    {counter} = {counter} + 1",
+            f'    return "{actions}"',
+        ]
+        return _insert_guard_lines(working_code, body)
+
+    body = [
+        marker,
+        "if (",
+        f'    state.get("zone") == {zone!r}',
+        f'    and state.get("act") == {act!r}',
+        f'    and {lower} <= state.get("x_pos", 0) <= {upper}',
+        "):",
+        f'    return "{actions}"',
+    ]
+    return _insert_guard_lines(working_code, body)
+
+
+def llm_guard_marker(code):
+    match = re.search(r"# LLM_GUARD zone=\S+ act=\S+ x=-?\d+", code or "")
+    return match.group(0) if match else None
+
+
 def recently_attempted_frontier_guard(marker, recent_history):
     for entry in recent_history or []:
         recorded_marker = entry.get("frontier_guard_marker")
