@@ -506,6 +506,42 @@ def resolve_working_fitness_floor(
     return max(baseline_fitness, champion_fitness)
 
 
+def promotion_confirmed(original_fitness, retest_fitness, bar):
+    """A would-be promotion is only confirmed when the candidate beats the bar on
+    BOTH the original evaluation and a retest.
+
+    Evaluation has run-to-run variance (observed live: the same policy scoring
+    54397 or 50541 depending on get_action timing under load), so a single lucky
+    eval must not become the champion.
+    """
+    return original_fitness > bar and retest_fitness > bar
+
+
+def retest_candidate_fitness(env, mutator, candidate_path, max_frames, action_repeat):
+    """Re-evaluate a candidate once to confirm a fitness gain reproduces.
+
+    Returns the retest fitness, or None if it could not be run (the caller then
+    keeps the original single-eval decision).
+    """
+    try:
+        policy = load_policy(candidate_path)
+    except Exception as e:
+        print(f"Retest load failed: {e}")
+        return None
+    try:
+        return evaluate_policy(
+            env,
+            policy,
+            mutator,
+            max_frames,
+            action_repeat=action_repeat,
+            snapshot_sink=FailureSnapshotRing(),
+        )[0]
+    except Exception as e:
+        print(f"Retest eval failed: {e}")
+        return None
+
+
 def candidate_is_promotable(env, policy, components):
     return env is not None and policy is not None and not components.get("runtime_error")
 
@@ -782,6 +818,32 @@ def run_evaluation_loop(
                     print("Failed to render video: renderer exited without a video.")
             except Exception as e:
                 print(f"Failed to render video: {e}")
+
+        # Retest a would-be winner before promoting it: eval variance means a
+        # single lucky run must not become the champion. Require the gain to
+        # reproduce and record the conservative (min) fitness.
+        if (
+            env is not None
+            and best_candidate_promotable
+            and best_candidate_fitness > working_fitness
+            and best_candidate_path
+            and os.path.exists(best_candidate_path)
+        ):
+            retest_fitness = retest_candidate_fitness(
+                env, mutator, best_candidate_path, max_frames, action_repeat
+            )
+            if retest_fitness is not None:
+                confirmed = promotion_confirmed(
+                    best_candidate_fitness, retest_fitness, working_fitness
+                )
+                print(
+                    f"Retest of best candidate: {best_candidate_fitness:.2f} -> "
+                    f"{retest_fitness:.2f} (bar {working_fitness:.2f}); "
+                    f"{'confirmed' if confirmed else 'NOT reproduced -- variance, not promoting'}"
+                )
+                best_candidate_fitness = min(best_candidate_fitness, retest_fitness)
+                if not confirmed:
+                    best_candidate_promotable = False
 
         promoted = best_candidate_promotable and best_candidate_fitness > working_fitness
         # Only a promoted run may replace the persisted diagnosis window: a
