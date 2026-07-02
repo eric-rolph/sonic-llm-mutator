@@ -161,12 +161,16 @@ def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
 
     segments = experiment.get("segments") or []
     if len(segments) >= 2:
-        # Compile a timed sequence as FRAME REPLAY anchored on the first
-        # crossing of the sequence's start x. The deterministic emulator and
-        # unchanged approach code reproduce the arrival state, so replaying
-        # the measured frame counts is faithful — unlike x-threshold dispatch,
-        # which live testing showed releases B after the few frames it takes
-        # to cross a band, turning the verified full jump into a short hop.
+        # Compile a timed sequence as FRAME REPLAY. The jump and everything
+        # after it must be TIME-held (x-threshold dispatch releases B after the
+        # few frames it takes to cross a band, turning a verified full jump
+        # into a short hop). But anchoring the whole replay on band ENTRY is
+        # position-sloppy: entering the +/-25 band early makes a timed run-up
+        # fall short of the measured launch point (live-observed: verified
+        # escape reached x=4272, the compiled replay peaked at 4263 and died).
+        # So when the first segment is a plain B-less run-up and the second
+        # segment's measured start_x is known, gate the run-up BY POSITION and
+        # anchor the timed replay exactly at the measured launch x.
         cleaned = []
         for segment in segments:
             seg_actions = _valid_actions(segment.get("actions") if isinstance(segment, dict) else None)
@@ -176,10 +180,51 @@ def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
                 return None
             if seg_actions is None:
                 return None
-            cleaned.append((seg_frames, seg_actions))
-        total_frames = sum(frames for frames, _ in cleaned)
+            seg_start_x = None
+            if isinstance(segment, dict):
+                try:
+                    seg_start_x = int(segment["start_x"])
+                except (KeyError, TypeError, ValueError):
+                    seg_start_x = None
+            cleaned.append((seg_frames, seg_actions, seg_start_x))
 
         counter = f"_DIAG_REPLAY_{zone}_{act}_{start_x}"
+        launch_x = cleaned[1][2]
+        position_gated = (
+            "B" not in cleaned[0][1]
+            and launch_x is not None
+            and launch_x > start_x
+        )
+        if position_gated:
+            timed = cleaned[1:]
+            total_frames = sum(frames for frames, _, _ in timed)
+            body = [
+                f"global {counter}",
+                f"if {counter!r} not in globals():",
+                f"    {counter} = -1",
+                "if (",
+                f"    state.get(\"zone\") == {zone!r}",
+                f"    and state.get(\"act\") == {act!r}",
+                f"    and {counter} < {total_frames}",
+                "):",
+                "    _diag_x = state.get(\"x_pos\", 0)",
+                f"    if {counter} < 0 and {lower} <= _diag_x < {launch_x}:",
+                f"        return \"{cleaned[0][1]}\"",  # position-gated run-up
+                f"    if {counter} < 0 and {launch_x} <= _diag_x <= {launch_x + x_radius}:",
+                f"        {counter} = 0",  # anchor exactly at the measured launch
+                f"    if {counter} >= 0:",
+                f"        {counter} = {counter} + 1",
+            ]
+            threshold = 0
+            for seg_frames, seg_actions, _ in timed[:-1]:
+                threshold += seg_frames
+                body.append(f"        if {counter} <= {threshold}:")
+                body.append(f"            return \"{seg_actions}\"")
+            body.append(f"        return \"{timed[-1][1]}\"")
+            guard_lines = [marker] + body
+            return _insert_guard_lines(working_code, guard_lines)
+
+        total_frames = sum(frames for frames, _, _ in cleaned)
         body = [
             f"global {counter}",
             f"if {counter!r} not in globals():",
@@ -193,7 +238,7 @@ def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
             f"    {counter} = {counter} + 1",
         ]
         threshold = 0
-        for seg_frames, seg_actions in cleaned[:-1]:
+        for seg_frames, seg_actions, _ in cleaned[:-1]:
             threshold += seg_frames
             body.append(f"    if {counter} < {threshold}:")
             body.append(f"        return \"{seg_actions}\"")
