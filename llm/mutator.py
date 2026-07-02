@@ -75,28 +75,34 @@ def extract_json_object(text):
     return None
 
 
+def _parses(code):
+    try:
+        ast.parse(code)
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
 def _defines_get_action(code):
     """True if ``code`` parses as Python and defines a top-level get_action."""
-    try:
-        tree = ast.parse(code)
-    except (SyntaxError, ValueError):
+    if not _parses(code):
         return False
     return any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "get_action"
-        for node in tree.body
+        for node in ast.parse(code).body
     )
 
 
-def extract_policy_code(raw_response):
-    """Pull the policy source out of a (possibly reasoning-model) response.
+def extract_python_block(raw_response, predicate=_parses):
+    """Pull working source out of a (possibly reasoning-model) response.
 
     Reasoning models such as Gemma emit several fenced blocks in their
-    scratchpad -- partial drafts, the final version, sometimes a state-dict
-    example. The old heuristic took the *last* fenced block unconditionally,
-    which on a reasoning model frequently grabbed a truncated draft and produced
-    a SyntaxError. Instead, return the last fenced block that actually parses and
-    defines a top-level ``get_action``; only if none qualifies fall back to the
-    previous last-block/raw behavior so the validator + repair path still runs.
+    scratchpad -- partial drafts, the final version, sometimes an example. The
+    old heuristic took the *last* fenced block unconditionally, which frequently
+    grabbed a truncated draft and produced a SyntaxError. Instead, return the
+    last fenced block satisfying ``predicate``; only if none qualifies fall back
+    to the previous last-block/raw behavior so downstream validation/repair
+    still gets *something* rather than silently dropping the model's output.
     """
     if not raw_response:
         return ""
@@ -104,21 +110,22 @@ def extract_policy_code(raw_response):
     blocks = [b.strip() for b in re.findall(r"```(?:python)?\s*\n?(.*?)```", raw_response, re.DOTALL)]
     blocks = [b for b in blocks if b]
 
-    # Best: the last fenced block that is a complete, parseable policy.
     for block in reversed(blocks):
-        if _defines_get_action(block):
+        if predicate(block):
             return block
 
-    # Next: the response may be bare code with no fences at all.
     stripped = raw_response.strip()
-    if _defines_get_action(stripped):
+    if predicate(stripped):
         return stripped
 
-    # Fallback: keep the previous heuristic so downstream validation/repair gets
-    # *something* rather than silently dropping the model's output.
     if blocks:
         return blocks[-1]
     return stripped
+
+
+def extract_policy_code(raw_response):
+    """The last fenced block that parses AND defines a top-level get_action."""
+    return extract_python_block(raw_response, predicate=_defines_get_action)
 
 
 # Hard cap on stored lessons; oldest entries are dropped beyond this.
@@ -872,11 +879,9 @@ Return ONLY valid Python code containing the updated skill library (the existing
 
         if new_skills_code:
             try:
-                if "```python" in new_skills_code:
-                    new_skills_code = new_skills_code.split("```python")[-1].split("```")[0].strip()
-                elif "```" in new_skills_code:
-                    parts = new_skills_code.split("```")
-                    new_skills_code = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
+                # Robust extraction: the last fenced block that actually parses
+                # (reasoning models leave truncated drafts in their scratchpad).
+                new_skills_code = extract_python_block(new_skills_code)
 
                 existing_functions = _top_level_functions(existing_skills)
                 new_functions = _top_level_functions(new_skills_code)

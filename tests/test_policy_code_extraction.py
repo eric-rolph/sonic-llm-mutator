@@ -1,8 +1,23 @@
 import unittest
 
-from llm.mutator import extract_policy_code
+from llm.mutator import extract_policy_code, extract_python_block
 
 GOOD = "def get_action(state):\n    return 'RIGHT'"
+
+
+class ExtractPythonBlockTests(unittest.TestCase):
+    def test_skills_style_extraction_skips_truncated_draft(self):
+        # Skills responses have no get_action; the generic extractor keeps the
+        # last block that PARSES, skipping a truncated reasoning draft.
+        resp = (
+            "Draft:\n```python\ndef boost(state):\n    if state['x'] ==\n```\n"
+            "Final:\n```python\ndef boost(state):\n    return 'RIGHT,B'\n```"
+        )
+        self.assertEqual(extract_python_block(resp), "def boost(state):\n    return 'RIGHT,B'")
+
+    def test_falls_back_to_last_block_when_nothing_parses(self):
+        resp = "```python\ndef a(:\n```\n```python\ndef b(:\n```"
+        self.assertEqual(extract_python_block(resp), "def b(:")
 
 
 class ExtractPolicyCodeTests(unittest.TestCase):
