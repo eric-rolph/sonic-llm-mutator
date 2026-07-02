@@ -33,8 +33,11 @@ SEQUENCES = (
     ({"actions": "RIGHT", "frames": 120}, {"actions": "RIGHT,B", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
     ({"actions": "RIGHT", "frames": 60}, {"actions": "RIGHT,UP,B", "frames": 50}, {"actions": "RIGHT", "frames": 100}),
     ({"actions": "RIGHT,DOWN", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
-    # Back up for a longer runway, then jump at speed.
+    # Back up for a longer runway, then jump at speed. Wide gaps need launch
+    # SPEED: the runway length is the dominant unknown, so scan it too.
     ({"actions": "LEFT", "frames": 25}, {"actions": "RIGHT", "frames": 55}, {"actions": "RIGHT,B", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
+    ({"actions": "LEFT", "frames": 60}, {"actions": "RIGHT", "frames": 120}, {"actions": "RIGHT,B", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
+    ({"actions": "LEFT", "frames": 120}, {"actions": "RIGHT", "frames": 180}, {"actions": "RIGHT,B", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
 )
 
 

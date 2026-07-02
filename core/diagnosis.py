@@ -25,6 +25,12 @@ FRONTIER_PIN_CAPACITY = 4     # savestates pinned at the act frontier (see ring)
 TRY_ACTIONS_MAX_FRAMES = 300  # hard cap per counterfactual rollout (~5 s)
 SEQUENCE_MAX_SEGMENTS = 5     # segments per try_action_sequence experiment
 SEQUENCE_MAX_FRAMES = 600     # total frames per sequence experiment (~10 s)
+# After the scripted input ends, keep stepping this long to prove the escape is
+# SURVIVABLE. Live-observed loophole: a jump peaked past the frontier (x=4272 >
+# 4268) but Sonic was falling into a wider pit; the death landed after the
+# experiment horizon, and since ended_early only fires at lives==0 the doomed
+# trajectory VERIFIED and was compiled into the champion.
+VERIFY_SETTLE_FRAMES = 90
 
 # The emulator methods DiagnosisSession invokes through ProcessDiagnosisEnv.
 # This tuple IS the proxy contract -- the single place to edit when the
@@ -501,19 +507,36 @@ class DiagnosisSession:
             max_x = start["x_pos"]
             frames_done = 0
             ended_early = False
+            died = False
             for _ in range(hold):
                 obs, reward, done, info = env.step(action)
                 frames_done += 1
-                current_x = _info_subset(env.get_state())["x_pos"]
-                max_x = max(max_x, current_x)
+                current = _info_subset(env.get_state())
+                max_x = max(max_x, current["x_pos"])
+                if current["lives"] < start["lives"]:
+                    died = True
+                    break
                 if done:
                     ended_early = True
                     break
+            # Settle: keep holding the same input to prove the escape is
+            # SURVIVABLE, not a doomed arc whose death lands past the horizon.
+            if not died and not ended_early:
+                for _ in range(VERIFY_SETTLE_FRAMES):
+                    obs, reward, done, info = env.step(action)
+                    current = _info_subset(env.get_state())
+                    max_x = max(max_x, current["x_pos"])
+                    if current["lives"] < start["lives"]:
+                        died = True
+                        break
+                    if done:
+                        ended_early = True
+                        break
             end = _info_subset(env.get_state())
             shot = self._take_screenshot(env, f"try_{snapshot['frame']}")
             offset = self.failure_frame() - int(snapshot.get("frame", 0))
-            passed_frontier_x = max_x > self.frontier_x()
-            if passed_frontier_x and not ended_early:
+            passed_frontier_x = max_x > self.frontier_x() and not died and not ended_early
+            if passed_frontier_x:
                 self.verified_experiments.append(
                     {
                         "zone": start["zone"],
@@ -529,8 +552,9 @@ class DiagnosisSession:
                 f"Held '{actions}' for {frames_done} frames starting {offset} frames before the failure. "
                 f"x: {start['x_pos']} -> {end['x_pos']} (max {max_x}), y: {start['y_pos']} -> {end['y_pos']}, "
                 f"rings: {start['rings']} -> {end['rings']}, lives: {start['lives']} -> {end['lives']}. "
-                f"Beat the run's furthest progress (frontier x={self.frontier_x()}): "
+                f"Beat the run's furthest progress (frontier x={self.frontier_x()}) AND survived: "
                 f"{'YES — VERIFIED ESCAPE, this input will be compiled into a candidate policy' if passed_frontier_x else 'no'}."
+                + (" Sonic DIED on this trajectory — not a survivable escape." if died else "")
                 + (" The episode ended during this experiment (death or level end)." if ended_early else "")
             )
             return {"ok": True, "text": text, "screenshot": shot, "passed_frontier_x": passed_frontier_x}
@@ -572,6 +596,7 @@ class DiagnosisSession:
             start = _info_subset(env.get_state())
             max_x = start["x_pos"]
             ended_early = False
+            died = False
             played = []
             for segment in normalized:
                 segment_start = _info_subset(env.get_state())
@@ -580,7 +605,11 @@ class DiagnosisSession:
                 for _ in range(segment["frames"]):
                     obs, reward, done, info = env.step(action)
                     frames_done += 1
-                    max_x = max(max_x, _info_subset(env.get_state())["x_pos"])
+                    current = _info_subset(env.get_state())
+                    max_x = max(max_x, current["x_pos"])
+                    if current["lives"] < start["lives"]:
+                        died = True
+                        break
                     if done:
                         ended_early = True
                         break
@@ -592,14 +621,29 @@ class DiagnosisSession:
                         "start_y": segment_start["y_pos"],
                     }
                 )
-                if ended_early:
+                if ended_early or died:
                     break
+
+            # Settle with the final segment's input to prove the escape is
+            # SURVIVABLE (see VERIFY_SETTLE_FRAMES).
+            if not died and not ended_early and played:
+                settle_action = action_string_to_array(played[-1]["actions"])
+                for _ in range(VERIFY_SETTLE_FRAMES):
+                    obs, reward, done, info = env.step(settle_action)
+                    current = _info_subset(env.get_state())
+                    max_x = max(max_x, current["x_pos"])
+                    if current["lives"] < start["lives"]:
+                        died = True
+                        break
+                    if done:
+                        ended_early = True
+                        break
 
             end = _info_subset(env.get_state())
             shot = self._take_screenshot(env, f"seq_{snapshot['frame']}")
             offset = self.failure_frame() - int(snapshot.get("frame", 0))
-            passed_frontier_x = max_x > self.frontier_x()
-            if passed_frontier_x and not ended_early:
+            passed_frontier_x = max_x > self.frontier_x() and not died and not ended_early
+            if passed_frontier_x:
                 self.verified_experiments.append(
                     {
                         "zone": start["zone"],
@@ -618,8 +662,9 @@ class DiagnosisSession:
             text = (
                 f"Played sequence [{steps_text}] starting {offset} frames before the failure. "
                 f"x: {start['x_pos']} -> {end['x_pos']} (max {max_x}), y: {start['y_pos']} -> {end['y_pos']}. "
-                f"Beat the run's furthest progress (frontier x={self.frontier_x()}): "
+                f"Beat the run's furthest progress (frontier x={self.frontier_x()}) AND survived: "
                 f"{'YES — VERIFIED ESCAPE, this sequence will be compiled into a candidate policy' if passed_frontier_x else 'no'}."
+                + (" Sonic DIED on this trajectory — not a survivable escape." if died else "")
                 + (" The episode ended during this experiment (death or level end)." if ended_early else "")
             )
             return {"ok": True, "text": text, "screenshot": shot, "passed_frontier_x": passed_frontier_x}
