@@ -521,9 +521,11 @@ class DiagnosisSession:
                     break
             # Settle: keep holding the same input to prove the escape is
             # SURVIVABLE, not a doomed arc whose death lands past the horizon.
+            settle_done = 0
             if not died and not ended_early:
                 for _ in range(VERIFY_SETTLE_FRAMES):
                     obs, reward, done, info = env.step(action)
+                    settle_done += 1
                     current = _info_subset(env.get_state())
                     max_x = max(max_x, current["x_pos"])
                     if current["lives"] < start["lives"]:
@@ -544,6 +546,9 @@ class DiagnosisSession:
                         "start_x": start["x_pos"],
                         "actions": str(actions),
                         "hold_frames": frames_done,
+                        # The settle is part of the SURVIVED trajectory: guards
+                        # replay it too before handing back to the base policy.
+                        "settle_frames": settle_done,
                         "max_x": max_x,
                         "frames_before_failure": offset,
                     }
@@ -626,10 +631,12 @@ class DiagnosisSession:
 
             # Settle with the final segment's input to prove the escape is
             # SURVIVABLE (see VERIFY_SETTLE_FRAMES).
+            settle_done = 0
             if not died and not ended_early and played:
                 settle_action = action_string_to_array(played[-1]["actions"])
                 for _ in range(VERIFY_SETTLE_FRAMES):
                     obs, reward, done, info = env.step(settle_action)
+                    settle_done += 1
                     current = _info_subset(env.get_state())
                     max_x = max(max_x, current["x_pos"])
                     if current["lives"] < start["lives"]:
@@ -652,6 +659,9 @@ class DiagnosisSession:
                         "actions": played[0]["actions"],
                         "segments": played,
                         "hold_frames": sum(p["frames"] for p in played),
+                        # The settle is part of the SURVIVED trajectory: guards
+                        # replay it too before handing back to the base policy.
+                        "settle_frames": settle_done,
                         "max_x": max_x,
                         "frames_before_failure": offset,
                     }

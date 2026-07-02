@@ -105,6 +105,31 @@ class PositionGatedGuardTests(unittest.TestCase):
         self.assertEqual(act(4080), "RIGHT")
         self.assertEqual(act(4272), "RIGHT,DOWN")  # consumed; base policy
 
+    def test_settle_frames_extend_the_final_travel_segment(self):
+        # The verified trajectory includes the survival settle (input held,
+        # Sonic lived): the guard must replay it too, not hand control back to
+        # the base policy 90 frames early.
+        experiment = dict(EXPERIMENT)
+        experiment["segments"] = [
+            {"actions": "RIGHT", "frames": 60, "start_x": 3928, "start_y": 636},
+            {"actions": "RIGHT,B", "frames": 45, "start_x": 4053, "start_y": 620},
+            {"actions": "RIGHT", "frames": 2, "start_x": 4125, "start_y": 545},
+        ]
+        experiment["settle_frames"] = 3
+        code = build_diagnosis_guard_candidate(WORKING, experiment)
+        get_action = load_guard_policy(code)
+
+        def act(x):
+            return get_action({"zone": 0, "act": 1, "x_pos": x})
+
+        act(3940)  # engage; run-up (positional)
+        jump = [act(4053 + i) for i in range(45)]
+        self.assertTrue(all(a == "RIGHT,B" for a in jump))
+        # Final travel: 2 scripted + 3 settle = 5 frames before hand-back.
+        travel = [act(4150 + i) for i in range(5)]
+        self.assertTrue(all(a == "RIGHT" for a in travel), travel)
+        self.assertEqual(act(4900), "RIGHT,DOWN")  # consumed
+
     def test_missing_segment_start_x_falls_back_to_time_replay(self):
         experiment = dict(EXPERIMENT)
         experiment["segments"] = [

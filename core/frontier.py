@@ -188,6 +188,21 @@ def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
                     seg_start_x = None
             cleaned.append((seg_frames, seg_actions, seg_start_x))
 
+        # The survival settle is part of the VERIFIED trajectory (the input was
+        # held through it and Sonic lived): replay it too, instead of handing
+        # control back to the base policy 90 frames early (live-observed: the
+        # verified run reached x=4917 holding RIGHT through the settle; the
+        # compiled guard handed back after the scripted input and the base
+        # policy died at 4351).
+        try:
+            settle_extra = int(experiment.get("settle_frames", 0) or 0)
+        except (TypeError, ValueError):
+            settle_extra = 0
+        settle_extra = max(0, min(settle_extra, 300))
+        if settle_extra and cleaned:
+            last_frames, last_actions, last_start = cleaned[-1]
+            cleaned[-1] = (last_frames + settle_extra, last_actions, last_start)
+
         counter = f"_DIAG_REPLAY_{zone}_{act}_{start_x}"
         launch_x = cleaned[1][2]
         position_gated = (
