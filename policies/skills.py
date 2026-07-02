@@ -248,3 +248,7 @@ def replay_sequence_zone0_act1_2393(state, _STATE):
                 if _STATE["replay_2393"] < 160: return "RIGHT,B"
                 if _STATE["replay_2393"] < 280: return "RIGHT"
     return None
+
+
+def get_action(state):
+    return 'RIGHT'
