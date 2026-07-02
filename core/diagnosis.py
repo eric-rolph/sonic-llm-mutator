@@ -362,11 +362,15 @@ class DiagnosisSession:
     or a broken backend can never take down the training loop.
     """
 
-    def __init__(self, window, env_factory=None, screenshot_dir=DEFAULT_SCREENSHOT_DIR):
+    def __init__(self, window, env_factory=None, screenshot_dir=DEFAULT_SCREENSHOT_DIR,
+                 capture_screenshots=True):
         self.window = window
         self._env_factory = env_factory or _default_env_factory
         self._env = None
         self.screenshot_dir = screenshot_dir
+        # Mechanical sweeps run dozens of experiments; skipping the per-call
+        # screenshot write keeps them pure emulator compute.
+        self.capture_screenshots = bool(capture_screenshots)
         self._shot_count = 0
         self.last_screenshot = None
         # Experiments that measurably beat the run's frontier. These are the
@@ -452,6 +456,8 @@ class DiagnosisSession:
         return env
 
     def _take_screenshot(self, env, tag):
+        if not self.capture_screenshots:
+            return None
         os.makedirs(self.screenshot_dir, exist_ok=True)
         path = os.path.join(self.screenshot_dir, f"diagnosis_{self._shot_count:02d}_{tag}.png")
         self._shot_count += 1

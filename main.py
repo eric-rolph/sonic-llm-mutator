@@ -26,6 +26,7 @@ from core.diagnosis import (
     load_failure_window,
     window_key,
 )
+from core.escape_sweep import sweep_frontier_escapes
 from core.evaluation import build_policy_load_failure, evaluate_policy
 from core.frontier import (
     build_diagnosis_guard_candidate,
@@ -170,6 +171,7 @@ def maybe_diagnose_frontier(
     session_factory=None,
     report_path=DIAGNOSIS_REPORT_PATH,
     stagnation_counter=0,
+    window_loader=None,
 ):
     """Run agentic diagnosis on the frontier; reuse while it is unchanged.
 
@@ -185,7 +187,7 @@ def maybe_diagnose_frontier(
     window_dir = frontier.get("window")
     if not window_dir or not diagnosable_failure(frontier.get("failure_reason")):
         return None
-    window = load_failure_window(window_dir)
+    window = (window_loader or load_failure_window)(window_dir)
     if window is None:
         return None
 
@@ -200,12 +202,39 @@ def maybe_diagnose_frontier(
             "re-running agentic diagnosis with a fresh experiment budget."
         )
 
+    # Mechanical escape sweep first: dozens of canonical inputs replayed at the
+    # frontier cost seconds of emulator compute and zero model calls. The vision
+    # session (minutes of model time, ~6 experiments) is reserved for obstacles
+    # the standard battery cannot beat.
+    sweep_note = ""
+    if os.environ.get("SONIC_ESCAPE_SWEEP", "1") != "0":
+        experiments, summary = sweep_frontier_escapes(window, session_factory=session_factory)
+        if experiments:
+            result = {
+                "report": summary,
+                "evidence_screenshot": None,
+                "verified_experiments": experiments,
+            }
+            persist_diagnosis_report(result, frontier.get("failure_reason"), report_path=report_path)
+            cache["key"] = key
+            cache["result"] = result
+            cache["stagnation_counter"] = stagnation_counter
+            return result
+        sweep_note = (
+            "\nNote: a mechanical sweep already replayed the standard escapes at this "
+            "frontier (RIGHT,B holds, RIGHT,UP,B high jump, RIGHT,DOWN roll, run-up "
+            "jumps with 30/60/120-frame runways) and NONE beat it. Spend your "
+            "experiments on genuinely different approaches."
+        )
+
     session = None
     try:
         build_session = session_factory or DiagnosisSession
         session = build_session(window)
         print("Running agentic failure diagnosis on the working frontier...")
-        result = mutator.diagnose_failure(session, frontier.get("failure_reason"), frontier.get("trace"))
+        result = mutator.diagnose_failure(
+            session, str(frontier.get("failure_reason") or "") + sweep_note, frontier.get("trace")
+        )
         if result:
             print("Diagnosis complete.")
             persist_diagnosis_report(result, frontier.get("failure_reason"), report_path=report_path)
