@@ -909,6 +909,19 @@ Here is the current skill library:
 Extract any clear, reusable logic from the successful policy into standalone Python functions (skills).
 Return ONLY valid Python code containing the updated skill library (the existing skills plus any new ones). Do NOT include `get_action`.
 """
+        if len(prompt) > PROMPT_CHAR_BUDGET:
+            # A grown champion + library can overflow a local context window.
+            # The merge below dedups by function name, so asking for only NEW
+            # functions (library omitted) is safe.
+            prompt = f"""
+We have discovered a highly successful AI policy:
+```python
+{policy_code}
+```
+
+Extract any clear, reusable logic from the successful policy into standalone Python functions (skills).
+Return ONLY valid Python code containing the NEW functions. Do NOT include `get_action`.
+"""
         new_skills_code, _ = self._call_micro_model(prompt, temperature=0.3)
 
         if new_skills_code:
@@ -1237,7 +1250,31 @@ optional allowed skills import followed by that function.
     def crossover_policies(self, policy_a_code, policy_b_code, recent_history, temperature=0.7):
         history_text = json.dumps(slim_history(recent_history), indent=2)
 
-        prompt = f"""
+        def build_prompt(history_block):
+            return self._crossover_prompt(policy_a_code, policy_b_code, history_block)
+
+        # Two grown champions can exceed a local model's context by themselves
+        # (live-observed 400s: guards accumulate ~20 lines per conquered
+        # frontier). Drop the optional history first; if the PARENTS alone
+        # overflow the budget, a faithful merge is impossible in-window --
+        # skip explicitly instead of hard-failing the call.
+        prompt = build_prompt(history_text)
+        if len(prompt) > PROMPT_CHAR_BUDGET:
+            prompt = build_prompt("[]")
+        if len(prompt) > PROMPT_CHAR_BUDGET:
+            raise ValueError(
+                "crossover parents exceed the prompt budget; skipping crossover"
+            )
+
+        raw_response, reasoning = self._call_micro_model(prompt, temperature)
+        reasoning = "FunSearch Crossover Offspring"
+
+        print(f"Raw Response from LLM (crossover): {repr(raw_response)}")
+        return extract_policy_code(raw_response), reasoning
+
+    @staticmethod
+    def _crossover_prompt(policy_a_code, policy_b_code, history_text):
+        return f"""
 We are performing an Evolutionary Algorithm Crossover. We have two highly successful policies (Parent A and Parent B) that each excel in different areas.
 
 Parent A Code:
@@ -1259,9 +1296,3 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
 
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
 """
-
-        raw_response, reasoning = self._call_micro_model(prompt, temperature)
-        reasoning = "FunSearch Crossover Offspring"
-
-        print(f"Raw Response from LLM (crossover): {repr(raw_response)}")
-        return extract_policy_code(raw_response), reasoning

@@ -32,6 +32,45 @@ class SlimHistoryTests(unittest.TestCase):
         self.assertEqual(slim_history(["not-a-dict", 42]), [])
 
 
+class CrossoverBudgetTests(unittest.TestCase):
+    def _mutator(self):
+        from llm.mutator import MutatorClient
+
+        class CapturingMutator(MutatorClient):
+            def __init__(self):
+                self.prompts = []
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                self.prompts.append(prompt)
+                return "def get_action(state):\n    return 'RIGHT'", "ok"
+
+        return CapturingMutator()
+
+    def test_normal_parents_cross_over_within_budget(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from llm.mutator import PROMPT_CHAR_BUDGET
+
+        mutator = self._mutator()
+        with redirect_stdout(StringIO()):
+            code, _ = mutator.crossover_policies("def get_action(state):\n    return 'RIGHT'",
+                                                 "def get_action(state):\n    return 'LEFT'", [])
+        self.assertIn("get_action", code)
+        self.assertLessEqual(len(mutator.prompts[0]), PROMPT_CHAR_BUDGET)
+
+    def test_oversized_parents_skip_crossover_explicitly(self):
+        # Two grown champions can exceed a local model's context by themselves;
+        # a faithful merge is impossible in-window, so skip loudly (the caller
+        # already treats a raising crossover as a filled-by-fallback slot)
+        # instead of hard-failing the API call.
+        mutator = self._mutator()
+        huge = "def get_action(state):\n    return 'RIGHT'\n" + ("# pad\n" * 4000)
+        with self.assertRaises(ValueError):
+            mutator.crossover_policies(huge, huge, [])
+        self.assertEqual(mutator.prompts, [])  # no over-budget call was made
+
+
 class PromptBudgetTests(unittest.TestCase):
     def test_oversized_history_is_dropped_to_fit_the_budget(self):
         from llm.mutator import PROMPT_CHAR_BUDGET, MutatorClient
