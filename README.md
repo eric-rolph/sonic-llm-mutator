@@ -34,18 +34,20 @@ To maximize efficiency and minimize API costs, the mutator (`llm/mutator.py`) in
 
     > A 30-generation run surfaced this: originally "stuck" was treated as a blind code bug and sent to the code model, but with **zero** vision calls the agent could never get past Act 2 geometry it couldn't see (a hard plateau). Stuck failures now get eyes, since being blocked is fundamentally a visual problem.
 
-## Agentic Failure Diagnosis
+## Verified Escapes: Sweep First, Vision Second
 
-A static death-frame tells the vision model *where* Sonic failed, but it can only guess *why* and *what would have worked*. Diagnosis makes that experimental:
+A static death-frame tells the vision model *where* Sonic failed, but it can only guess *why* and *what would have worked*. This pipeline makes escapes **experimental and verified** instead:
 
-1. **Capture**: during every evaluation, whole-machine emulator savestates are captured every 60 frames into a small ring (~10 s of history, `core/diagnosis.py`). When a run becomes the working frontier, its window is persisted to `artifacts/diagnosis/window/`.
-2. **Investigate**: before mutating, the vision model is dropped into an interactive session over that window (standard OpenAI function calling, so it works with every supported provider). Its tools:
+1. **Capture**: during every evaluation, whole-machine emulator savestates are captured every 60 frames into a small ring (~10 s of history, `core/diagnosis.py`). Savestates taken while the act's max-x was still improving are **pinned as frontier snapshots** — exempt from the trailing eviction — so when Sonic dies at the frontier and respawns at a checkpoint, the moments *just before the death* survive into the window (without pins, every experiment could only start post-respawn and no escape could ever verify). When a run becomes the working frontier, its window is persisted to `artifacts/diagnosis/window/`.
+2. **Mechanical escape sweep** (`core/escape_sweep.py`): before any model is consulted, a battery of canonical Sonic moves — jump/high-jump holds, rolls, and run-up-then-jump sequences over several runway lengths — is replayed from every pinned savestate. Each experiment is milliseconds of emulator compute, so ~40 attempts cost seconds and zero model calls. Toggle with `SONIC_ESCAPE_SWEEP=0`.
+3. **Agentic vision diagnosis** (fallback): only when the battery fails is the vision model dropped into an interactive session over the same window (standard OpenAI function calling), told which standard moves already failed, with tools:
    * `view_frame(frames_before_failure)` — rewind a dedicated, non-recording emulator to any captured moment; returns the authoritative RAM state plus a screenshot.
-   * `try_actions(frames_before_failure, actions, hold_frames)` — actually run a counterfactual input (≤300 frames) and report measured movement, ring/life changes, and whether Sonic progressed past the failure point.
+   * `try_actions(frames_before_failure, actions, hold_frames)` / `try_action_sequence(...)` — actually run a counterfactual input and report measured movement, ring/life changes, and whether it beat the frontier.
    * `finish_diagnosis(report)` — submit the findings. Budget: 6 tool calls, then a final report is forced.
-3. **Mutate**: the report — ideally containing a *verified* working input sequence, not a guess — is embedded in the mutation prompt, and the diagnosis screenshot replaces the generic montage.
+4. **Verification is strict**: an escape only counts if it beats the run's frontier x **and Sonic survives it** — experiments track life-loss and keep stepping through a settle window past the scripted input, so a jump that peaks past the frontier while falling into a wider pit is rejected, not compiled.
+5. **Compilation, not translation**: a verified escape is compiled *deterministically* into a guard prepended to the working policy (`core/frontier.py`) — the LLM never re-writes its own finding into code. Forward run-ups compile **position-gated** (hold the run-up until the measured launch x, then time-replay the jump), which live testing showed replays faithfully where band-anchored time replay missed precision jumps.
 
-One diagnosis serves the whole generation (all candidates mutate the same frontier) and is cached until the frontier changes, so stagnant generations pay nothing. Disable with `SONIC_AGENTIC_DIAGNOSIS=0`; on any error (no vision key, no savestate support, provider without tool calling) the pipeline silently falls back to the previous one-shot montage behavior.
+One sweep/diagnosis serves the whole generation and is cached until the frontier changes, so stagnant generations pay nothing. Disable diagnosis with `SONIC_AGENTIC_DIAGNOSIS=0`; on any error (no vision key, no savestate support, provider without tool calling) the pipeline silently falls back to the previous one-shot montage behavior.
 
 The same persisted window is exposed through the MCP sidecar (`list_failure_window`, `view_failure_frame`, `try_failure_actions`), so you can interactively replay exactly the failure the mutator was reasoning about.
 

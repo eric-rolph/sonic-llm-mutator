@@ -128,6 +128,35 @@ def extract_policy_code(raw_response):
     return extract_python_block(raw_response, predicate=_defines_get_action)
 
 
+def slim_history(recent_history, max_reasoning_chars=200):
+    """Compact history for prompts: keep only what informs the next mutation.
+
+    Full history entries carry archive paths, screenshot paths, and unbounded
+    reasoning text; serialized whole they overflowed a local model's 8k context
+    (live-observed: 'n_keep: 8387 >= n_ctx: 8192'), failing the call outright.
+    """
+    slimmed = []
+    for entry in recent_history or []:
+        if not isinstance(entry, dict):
+            continue
+        keep = {}
+        for key in ("generation", "fitness", "failure_reason"):
+            if key in entry:
+                keep[key] = entry[key]
+        reasoning = str(entry.get("llm_reasoning", "") or "")
+        if reasoning:
+            keep["llm_reasoning"] = reasoning[:max_reasoning_chars]
+        components = entry.get("components")
+        if isinstance(components, dict):
+            frontier = components.get("frontier")
+            if frontier is not None:
+                keep["frontier"] = frontier
+            if "levels_cleared" in components:
+                keep["levels_cleared"] = components["levels_cleared"]
+        slimmed.append(keep)
+    return slimmed
+
+
 # Hard cap on stored lessons; oldest entries are dropped beyond this.
 MAX_SEMANTIC_LESSONS = 100
 
@@ -1027,7 +1056,7 @@ hold_frames: how long to hold it -- ~12 for a hop, ~25 for a full jump, ~40 to r
         return guard
 
     def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None, diagnosis_report=None, frontier=None):
-        history_text = json.dumps(recent_history, indent=2)
+        history_text = json.dumps(slim_history(recent_history), indent=2)
         diagnosis_text = ""
         if diagnosis_report:
             diagnosis_text = (
@@ -1185,7 +1214,7 @@ optional allowed skills import followed by that function.
         return raw_response, reasoning
 
     def crossover_policies(self, policy_a_code, policy_b_code, recent_history, temperature=0.7):
-        history_text = json.dumps(recent_history, indent=2)
+        history_text = json.dumps(slim_history(recent_history), indent=2)
 
         prompt = f"""
 We are performing an Evolutionary Algorithm Crossover. We have two highly successful policies (Parent A and Parent B) that each excel in different areas.

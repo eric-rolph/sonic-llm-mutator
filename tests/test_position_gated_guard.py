@@ -74,6 +74,37 @@ class PositionGatedGuardTests(unittest.TestCase):
         # First frame in the band starts the replay immediately with the jump.
         self.assertEqual(get_action({"zone": 0, "act": 1, "x_pos": 3910}), "RIGHT,B")
 
+    def test_backward_runup_compiles_as_position_phase_machine(self):
+        # The live wide-pit escape: back up LEFT, charge RIGHT, jump at the
+        # measured edge. Band-anchored TIME replay missed (4917 verified vs
+        # 4258 replayed); each travel phase must be gated by POSITION.
+        experiment = {
+            "zone": 0, "act": 1, "start_x": 3593, "max_x": 4917, "actions": "LEFT",
+            "segments": [
+                {"actions": "LEFT", "frames": 60, "start_x": 3593, "start_y": 600},
+                {"actions": "RIGHT", "frames": 180, "start_x": 3143, "start_y": 600},
+                {"actions": "RIGHT,B", "frames": 2, "start_x": 4053, "start_y": 620},
+                {"actions": "RIGHT", "frames": 2, "start_x": 4125, "start_y": 545},
+            ],
+        }
+        code = build_diagnosis_guard_candidate(WORKING, experiment)
+        self.assertIsNotNone(code)
+        self.assertIn("_DIAG_PHASE_0_1_3593", code)
+        get_action = load_guard_policy(code)
+
+        def act(x):
+            return get_action({"zone": 0, "act": 1, "x_pos": x})
+
+        self.assertEqual(act(3600), "LEFT")     # engaged in band; back up
+        self.assertEqual(act(3400), "LEFT")     # still right of back-up point
+        self.assertEqual(act(3100), "RIGHT")    # reached it; charge
+        self.assertEqual(act(3500), "RIGHT")    # charging through the band again
+        self.assertEqual(act(4053), "RIGHT,B")  # measured launch: timed jump
+        self.assertEqual(act(4060), "RIGHT,B")  # full held jump
+        self.assertEqual(act(4070), "RIGHT")    # timed travel
+        self.assertEqual(act(4080), "RIGHT")
+        self.assertEqual(act(4272), "RIGHT,DOWN")  # consumed; base policy
+
     def test_missing_segment_start_x_falls_back_to_time_replay(self):
         experiment = dict(EXPERIMENT)
         experiment["segments"] = [
