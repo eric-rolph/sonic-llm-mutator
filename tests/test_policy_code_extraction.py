@@ -32,6 +32,41 @@ class SlimHistoryTests(unittest.TestCase):
         self.assertEqual(slim_history(["not-a-dict", 42]), [])
 
 
+class PromptBudgetTests(unittest.TestCase):
+    def test_oversized_history_is_dropped_to_fit_the_budget(self):
+        from llm.mutator import PROMPT_CHAR_BUDGET, MutatorClient
+
+        class CapturingMutator(MutatorClient):
+            def __init__(self):
+                self.prompts = []
+
+            def _call_micro_model(self, prompt, temperature=0.7):
+                self.prompts.append(prompt)
+                return "def get_action(state):\n    return 'RIGHT'", "ok"
+
+        # 400 history entries survive slim_history (~200 chars each) and blow
+        # far past the budget; the staged trim must drop them rather than send
+        # an over-budget prompt that hard-fails on an 8k-context local model.
+        history = [
+            {"generation": i, "fitness": 1.0, "failure_reason": "R" * 150}
+            for i in range(400)
+        ]
+        mutator = CapturingMutator()
+        from contextlib import redirect_stdout
+        from io import StringIO
+        with redirect_stdout(StringIO()):
+            code, _ = mutator.mutate_policy(
+                "def get_action(state):\n    return 'RIGHT'",
+                "Policy code timeout (infinite loop).",  # routes to micro, skips guard path
+                None,
+                history,
+            )
+
+        self.assertEqual(len(mutator.prompts), 1)
+        self.assertLessEqual(len(mutator.prompts[0]), PROMPT_CHAR_BUDGET)
+        self.assertIn("def get_action", mutator.prompts[0])  # code never dropped
+
+
 class ExtractPythonBlockTests(unittest.TestCase):
     def test_skills_style_extraction_skips_truncated_draft(self):
         # Skills responses have no get_action; the generic extractor keeps the

@@ -160,6 +160,11 @@ def slim_history(recent_history, max_reasoning_chars=200):
 # Hard cap on stored lessons; oldest entries are dropped beyond this.
 MAX_SEMANTIC_LESSONS = 100
 
+# Mutation prompts must fit a local model's context window WITH headroom for the
+# system prompt and the response (live-observed hard 400s at n_ctx=8192).
+# ~22k chars =~ 6.3k tokens.
+PROMPT_CHAR_BUDGET = 22_000
+
 # Ordered keyword buckets for collapsing the LLM's freeform hazard names
 # ("Wall/Ledge", "Vertical stuck loop", "Pitfall", ...) into a small category
 # set so paraphrased lessons about the same obstacle deduplicate.
@@ -1130,7 +1135,8 @@ hold_frames: how long to hold it -- ~12 for a hop, ~25 for a full jump, ~40 to r
             except Exception as e:
                 print(f"Error loading skills.py: {e}")
 
-        prompt = f"""
+        def build_prompt(history_block, lessons_block, skills_block):
+            return f"""
 Here is the current code that failed:
 ```python
 {current_code}
@@ -1143,11 +1149,11 @@ Primary Failure Reason (the working policy's own frontier): {failure_reason}
 
 Recent History of Other Evaluated Candidates (background only; these failures
 may not apply to the current code):
-{history_text}
+{history_block}
 
-{lessons_text}
+{lessons_block}
 
-{skills_text}
+{skills_block}
 
 Note on Vision Context: The emulator now actively looks at the screen every 5 seconds. The immediate upcoming visual context is injected into `state['vision_context']` (e.g., 'ENEMY', 'CLEAR', 'SPIKES'). You can write logic to check this string!
 
@@ -1167,6 +1173,21 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
 
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
 """
+
+        # Local models run with a finite context window and hard-fail past it
+        # (live-observed: 400 'n_keep >= n_ctx' at 8k as champions grow a guard
+        # per conquered frontier). Drop optional context in stages -- skills,
+        # then history, then lessons -- rather than fail the call outright. The
+        # failing code itself is never dropped.
+        prompt = build_prompt(history_text, lessons_text, skills_text)
+        for rebuild in (
+            lambda: build_prompt(history_text, lessons_text, ""),
+            lambda: build_prompt("[]", lessons_text, ""),
+            lambda: build_prompt("[]", "", ""),
+        ):
+            if len(prompt) <= PROMPT_CHAR_BUDGET:
+                break
+            prompt = rebuild()
 
         # Route by failure type. A pure code fault (an infinite loop caught as a
         # timeout), or having no frame to look at, goes to the local code model.
