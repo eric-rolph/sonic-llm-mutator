@@ -12,7 +12,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from core.frontier import (
     build_llm_guard_candidate,
-    llm_guard_marker,
+    new_guard_marker,
     recently_attempted_frontier_guard,
 )
 from core.fsio import atomic_write_text
@@ -182,6 +182,17 @@ _HAZARD_CATEGORIES = (
         ),
     ),
 )
+
+
+def valid_vision_label(label):
+    """True for a cache-worthy hazard tag: 1-2 short alphabetic words, not UNKNOWN."""
+    if not label or label == "UNKNOWN":
+        return False
+    words = str(label).split()
+    return (
+        1 <= len(words) <= 2
+        and all(word.isalpha() and len(word) <= 12 for word in words)
+    )
 
 
 def hazard_category(hazard, lesson_text=""):
@@ -504,8 +515,14 @@ class MutatorClient:
         return str(value) if value else None
 
     def store_vision_context(self, location_key, label):
-        """Persist a successful vision label; UNKNOWN never poisons a location."""
-        if not location_key or not label or label == "UNKNOWN":
+        """Persist a successful vision label; UNKNOWN never poisons a location.
+
+        Labels are validated against the expected shape (1-2 short alphabetic
+        words) before caching: the cache is permanent per location, so one
+        truncated-reasoning artifact would poison every future run through that
+        spot (agency review).
+        """
+        if not location_key or not valid_vision_label(label):
             return
         cache = self._load_vision_cache()
         cache[location_key] = str(label)
@@ -602,14 +619,24 @@ def get_action(state):
         return text, "Cloud vision analysis completed."
 
 
-    def _call_micro_model(self, prompt, temperature=0.7):
-        """Calls Local LLM for Micro-Mutations (code only)."""
+    def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
+        """Calls Local LLM for Micro-Mutations (code only).
+
+        ``fallback_policy=False`` returns ``(None, reason)`` on failure instead
+        of the seed-policy sentinel: non-mutation callers (lessons, skills,
+        repair) treated the sentinel as REAL model output — a failed call could
+        write a fake 'lesson' or 'skill' derived from placeholder code (agency
+        review, confirmed). Only candidate-generation slots want the sentinel
+        (a fallback policy is a harmless filled slot there).
+        """
         print(f"Using Local API ({self.micro_base_url}) for Micro-Mutation (Temp: {temperature}).")
         try:
             return self._do_micro_call(prompt, temperature)
         except Exception as e:
             print(f"Local inference failed after retries: {e}")
-            return "def get_action(state):\n    return 'RIGHT'", "Fallback to simple RIGHT."
+            if fallback_policy:
+                return "def get_action(state):\n    return 'RIGHT'", "Fallback to simple RIGHT."
+            return None, f"Local inference failed: {e}"
 
     @retry(
         wait=wait_exponential(multiplier=2, min=2, max=60),
@@ -816,7 +843,7 @@ Return ONLY a valid JSON object in this exact format:
     "lesson": "When at X=1500, do X to avoid Y"
 }}
 """
-        lesson_json_str, _ = self._call_micro_model(prompt, temperature=0.3)
+        lesson_json_str, _ = self._call_micro_model(prompt, temperature=0.3, fallback_policy=False)
         lesson_data = normalize_lesson(extract_json_object(lesson_json_str))
         if lesson_data is None:
             print("Failed to parse semantic lesson JSON.")
@@ -922,7 +949,7 @@ We have discovered a highly successful AI policy:
 Extract any clear, reusable logic from the successful policy into standalone Python functions (skills).
 Return ONLY valid Python code containing the NEW functions. Do NOT include `get_action`.
 """
-        new_skills_code, _ = self._call_micro_model(prompt, temperature=0.3)
+        new_skills_code, _ = self._call_micro_model(prompt, temperature=0.3, fallback_policy=False)
 
         if new_skills_code:
             try:
@@ -938,6 +965,11 @@ Return ONLY valid Python code containing the NEW functions. Do NOT include `get_
                 dropped_global_state = []
                 for node in new_ast.body:
                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if node.name == "get_action":
+                            # The prompt forbids it, but the model routinely
+                            # includes it anyway; merging it into the library
+                            # shadows the policy entry point (agency review).
+                            continue
                         if node.name not in existing_functions:
                             if _function_uses_global_state(node):
                                 dropped_global_state.append(node.name)
@@ -1068,7 +1100,7 @@ hold_frames: how long to hold it -- ~12 for a hop, ~25 for a full jump, ~40 to r
         guard = build_llm_guard_candidate(current_code, proposal)
         if guard is None:
             return None
-        if recently_attempted_frontier_guard(llm_guard_marker(guard), recent_history):
+        if recently_attempted_frontier_guard(new_guard_marker(current_code, guard), recent_history):
             print("Structured guard already attempted recently; falling back to rewrite.")
             return None
         return guard
@@ -1104,10 +1136,18 @@ hold_frames: how long to hold it -- ~12 for a hop, ~25 for a full jump, ~40 to r
 
         # Prefer a structured, champion-preserving guard: the model proposes only
         # WHAT to try (buttons + hold duration); the coordinates stay authoritative
-        # and the working code is never rewritten, only extended. Fall back to a
-        # full rewrite when there is no frontier, the fault is a code timeout, or
-        # the proposal does not compile into a fresh guard.
-        if "timeout" not in failure_reason.lower() and current_zone is not None and current_act is not None:
+        # and the working code is never rewritten, only extended. Requires the
+        # orchestrator's EXPLICIT frontier: trace-tail coordinates sit at the
+        # respawn point after a death, and stagnation-escape generations (which
+        # pass no frontier) must explore a distinct strategy instead of being
+        # re-anchored at the plateau (agency review: three reviewers flagged the
+        # hijack independently). Falls back to a full rewrite otherwise.
+        if (
+            isinstance(frontier, dict)
+            and "timeout" not in failure_reason.lower()
+            and current_zone is not None
+            and current_act is not None
+        ):
             try:
                 guard = self._try_structured_guard(
                     current_code, failure_reason, screenshot_path,
@@ -1148,7 +1188,10 @@ hold_frames: how long to hold it -- ~12 for a hop, ~25 for a full jump, ~40 to r
             except Exception as e:
                 print(f"Error loading skills.py: {e}")
 
-        def build_prompt(history_block, lessons_block, skills_block):
+        def build_prompt(history_block, lessons_block, skills_block,
+                         trace_block=None, diagnosis_block=None):
+            trace_block = trace_text if trace_block is None else trace_block
+            diagnosis_block = diagnosis_text if diagnosis_block is None else diagnosis_block
             return f"""
 Here is the current code that failed:
 ```python
@@ -1156,9 +1199,9 @@ Here is the current code that failed:
 ```
 
 Primary Failure Reason (the working policy's own frontier): {failure_reason}
-{trace_text}
+{trace_block}
 
-{diagnosis_text}
+{diagnosis_block}
 
 Recent History of Other Evaluated Candidates (background only; these failures
 may not apply to the current code):
@@ -1193,10 +1236,15 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         # then history, then lessons -- rather than fail the call outright. The
         # failing code itself is never dropped.
         prompt = build_prompt(history_text, lessons_text, skills_text)
+        # Least-valuable context first; the trace and (last) the diagnosis
+        # report are also droppable -- an irreducible over-budget prompt used
+        # to hard-fail the call outright (agency review).
         for rebuild in (
             lambda: build_prompt(history_text, lessons_text, ""),
             lambda: build_prompt("[]", lessons_text, ""),
             lambda: build_prompt("[]", "", ""),
+            lambda: build_prompt("[]", "", "", trace_block=""),
+            lambda: build_prompt("[]", "", "", trace_block="", diagnosis_block=""),
         ):
             if len(prompt) <= PROMPT_CHAR_BUDGET:
                 break
@@ -1239,13 +1287,12 @@ Do not use filesystem, process, network, dynamic-code-execution, or dunder APIs.
 Return ONLY valid Python code, starting with `def get_action(state):` or the
 optional allowed skills import followed by that function.
 """
-        raw_response, reasoning = self._call_micro_model(prompt, temperature=0.2)
-        if "```python" in raw_response:
-            raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
-        elif "```" in raw_response:
-            parts = raw_response.split("```")
-            raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
-        return raw_response, reasoning
+        raw_response, reasoning = self._call_micro_model(prompt, temperature=0.2, fallback_policy=False)
+        if raw_response is None:
+            return "", reasoning  # empty source fails validation -> load-failure path
+        # Same robust extraction as mutations: the fragile last-fenced-block
+        # split this replaced was exactly what extract_python_block fixed.
+        return extract_policy_code(raw_response), reasoning
 
     def crossover_policies(self, policy_a_code, policy_b_code, recent_history, temperature=0.7):
         history_text = json.dumps(slim_history(recent_history), indent=2)

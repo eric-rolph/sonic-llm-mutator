@@ -19,13 +19,14 @@ WINDOW = {
 class FakeSession:
     """Scriptable stand-in for DiagnosisSession."""
 
-    def __init__(self, window, capture_screenshots=True, verify_on_call=None):
+    def __init__(self, window, capture_screenshots=True, verify_on_call=None, verify_max_x=4400):
         self.window = window
         self.capture_screenshots = capture_screenshots
         self.verified_experiments = []
         self.calls = []
         self.closed = False
         self._verify_on_call = verify_on_call  # call index that "passes"
+        self._verify_max_x = verify_max_x
 
     def _experiment(self, kind, offset, payload):
         index = len(self.calls)
@@ -33,7 +34,7 @@ class FakeSession:
         if self._verify_on_call is not None and index == self._verify_on_call:
             self.verified_experiments.append(
                 {"zone": 0, "act": 1, "start_x": 3928, "actions": "RIGHT,B",
-                 "hold_frames": 45, "max_x": 4400, "frames_before_failure": offset}
+                 "hold_frames": 45, "max_x": self._verify_max_x, "frames_before_failure": offset}
             )
             return {"ok": True, "passed_frontier_x": True, "text": "YES"}
         return {"ok": True, "passed_frontier_x": False, "text": "no"}
@@ -48,11 +49,11 @@ class FakeSession:
         self.closed = True
 
 
-def run_sweep(verify_on_call=None, window=WINDOW, **kwargs):
+def run_sweep(verify_on_call=None, window=WINDOW, verify_max_x=4400, **kwargs):
     sessions = []
 
     def factory(w, capture_screenshots=True):
-        session = FakeSession(w, capture_screenshots, verify_on_call)
+        session = FakeSession(w, capture_screenshots, verify_on_call, verify_max_x)
         sessions.append(session)
         return session
 
@@ -86,12 +87,22 @@ class SweepTests(unittest.TestCase):
         self.assertTrue(session.closed)
         self.assertFalse(session.capture_screenshots)  # no PNG churn
 
-    def test_early_exit_once_verified(self):
+    def test_early_exit_once_robustly_verified(self):
+        # margin 4400 - 4268 = 132 >= ROBUST_ESCAPE_MARGIN -> stop immediately.
         experiments, summary, session = run_sweep(verify_on_call=1, stop_after=1)
         self.assertEqual(len(experiments), 1)
         self.assertEqual(experiments[0]["max_x"], 4400)
         self.assertIn("VERIFIED", summary)
         self.assertEqual(len(session.calls), 2)  # stopped right after the hit
+
+    def test_marginal_verify_does_not_stop_the_sweep(self):
+        # A +4px verify is kept but must not end the scan: stopping on the
+        # first zero-margin escapes starved robust ones behind marginal ones
+        # (agency review). The sweep continues through the full battery.
+        experiments, _, session = run_sweep(verify_on_call=1, verify_max_x=4272, stop_after=1)
+        self.assertEqual(len(experiments), 1)  # marginal escape still returned
+        per_offset = len(SINGLE_HOLDS) + len(SEQUENCES)
+        self.assertEqual(len(session.calls), 2 * per_offset)  # full battery ran
 
     def test_verified_shape_matches_guard_compiler(self):
         from core.frontier import build_diagnosis_guard_candidate

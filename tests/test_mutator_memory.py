@@ -88,6 +88,22 @@ class VisionCacheTests(unittest.TestCase):
             self.assertIsNone(client.cached_vision_context("key"))
             self.assertFalse(os.path.exists(cache_path))
 
+    def test_malformed_labels_never_poison_a_location(self):
+        # The cache is permanent per location: one truncated-reasoning artifact
+        # would bias every future run through that spot (agency review).
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = os.path.join(tmp, "vision_cache.json")
+            client = self.make_client(cache_path)
+            for junk in (
+                "THE IMMEDIATE UPCOMING HAZARD IS",   # >2 words
+                "SPIKES123",                           # non-alphabetic
+                "SUPERCALIFRAGILISTIC EXPIALIDOCIOUS", # oversized words
+            ):
+                client.store_vision_context("key", junk)
+            self.assertIsNone(client.cached_vision_context("key"))
+            client.store_vision_context("key", "SPIKES ENEMIES")  # valid 2-word tag
+            self.assertEqual(client.cached_vision_context("key"), "SPIKES ENEMIES")
+
 
 class MutatorMemoryTests(unittest.TestCase):
     def test_extract_json_object_handles_fenced_json(self):
@@ -206,7 +222,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 pass
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 return '{"x": 4242, "hazard": "Pit", "lesson": "Jump at 4242"}', "local"
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,7 +261,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 self.called = []
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 self.called.append("micro")
                 return "def get_action(state):\n    return 'RIGHT'", "micro"
 
@@ -271,7 +287,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 self.prompt = ""
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 self.prompt = prompt
                 return "def get_action(state):\n    return 'RIGHT'", "micro"
 
@@ -294,7 +310,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 self.prompt = ""
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 self.prompt = prompt
                 return "def get_action(state):\n    return 'RIGHT'", "micro"
 
@@ -327,7 +343,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 self.called = []
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 self.called.append("micro")
                 return "code", "micro"
 
@@ -364,7 +380,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 self.prompts = []
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 self.prompts.append((prompt, temperature))
                 return "```python\ndef get_action(state):\n    return 'RIGHT'\n```", "fixed"
 
@@ -389,7 +405,7 @@ class MutatorMemoryTests(unittest.TestCase):
                 self.macro_client = None
                 self.temperatures = []
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 self.temperatures.append(temperature)
                 return "code", "local"
 
@@ -422,7 +438,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 pass
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 return "def unsafe(state):\n    writer = open\n    return writer('owned.txt', 'w')", "local"
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -447,7 +463,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 pass
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 return "def updated(state):\n    return 'RIGHT,B'", "local"
 
         loaded_skills = types.ModuleType("policies.skills")
@@ -481,7 +497,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 pass
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 return "def replacement(state):\n    return 'RIGHT'", "local"
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -513,7 +529,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 pass
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 return (
                     "def replay_guard(state, _STATE):\n"
                     "    global _DIAG_REPLAY_0_1_2393\n"
@@ -548,7 +564,7 @@ class MutatorMemoryTests(unittest.TestCase):
             def __init__(self):
                 pass
 
-            def _call_micro_model(self, prompt, temperature=0.7):
+            def _call_micro_model(self, prompt, temperature=0.7, fallback_policy=True):
                 return "def existing(state):\n    return 'LEFT'", "local"
 
         with tempfile.TemporaryDirectory() as tmp:

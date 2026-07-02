@@ -47,6 +47,24 @@ SEQUENCES = (
 )
 
 
+# Early-exit threshold: keep sweeping until an escape clears the frontier by
+# this margin (px). Stopping on the first zero-margin verifies starved robust
+# escapes behind marginal ones (agency review: short-hop-first ordering plus a
+# stop-after-2 count let two +4px verifies end the sweep).
+ROBUST_ESCAPE_MARGIN = 50
+
+
+def battery_description():
+    """One-line prose summary of the battery, GENERATED from the constants so
+    the note handed to the vision model can never drift from what actually ran
+    (agency review: a hardcoded copy had already drifted)."""
+    holds = ", ".join(f"{actions} x{frames}" for actions, frames in SINGLE_HOLDS)
+    sequences = "; ".join(
+        "->".join(f"{s['actions']} x{s['frames']}" for s in seq) for seq in SEQUENCES
+    )
+    return f"single holds: {holds}. sequences: {sequences}"
+
+
 def sweep_offsets(window, max_offsets=4):
     """Rewind offsets to sweep from, most runway first.
 
@@ -97,19 +115,37 @@ def sweep_frontier_escapes(
         offsets = sweep_offsets(window, max_offsets=max_offsets)
         if not offsets:
             return [], "Escape sweep skipped: no usable savestates in the window."
+
+        try:
+            frontier_x = int(window.get("failure", {}).get("frontier_x", 0))
+        except (TypeError, ValueError):
+            frontier_x = 0
+
+        def satisfied():
+            """Stop early only for a ROBUST escape (or a full quota of them).
+
+            Stopping on the first zero-margin verifies starved better escapes
+            behind marginal ones; a marginal verify is kept but the sweep
+            keeps scanning for one that clears the frontier with real margin.
+            """
+            verified = session.verified_experiments
+            if any(e.get("max_x", 0) - frontier_x >= ROBUST_ESCAPE_MARGIN for e in verified):
+                return True
+            return len(verified) >= max(stop_after, 4)
+
         for offset in offsets:
             for actions, hold in SINGLE_HOLDS:
                 session.try_actions(offset, actions, hold)
                 attempted += 1
-                if len(session.verified_experiments) >= stop_after:
+                if satisfied():
                     break
-            if len(session.verified_experiments) < stop_after:
+            if not satisfied():
                 for segments in SEQUENCES:
                     session.try_action_sequence(offset, list(segments))
                     attempted += 1
-                    if len(session.verified_experiments) >= stop_after:
+                    if satisfied():
                         break
-            if len(session.verified_experiments) >= stop_after:
+            if satisfied():
                 break
         experiments = sorted(
             session.verified_experiments, key=lambda e: e.get("max_x", 0), reverse=True

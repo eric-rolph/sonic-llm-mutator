@@ -33,12 +33,14 @@ def make_mutator(proposal_raw):
 
 
 class StructuredMutationTests(unittest.TestCase):
+    FRONTIER = {"zone": 0, "act": 1, "x": 4268}
+
     def test_valid_proposal_becomes_preserving_guard_no_rewrite(self):
         mutator = make_mutator('{"action": "RIGHT,B", "hold_frames": 20}')
         with redirect_stdout(StringIO()):
             code, reasoning = mutator.mutate_policy(
                 WORKING, "Sonic got stuck: no progress (zone 0 act 1)", "shot.png", [],
-                coordinate_trace=TRACE,
+                coordinate_trace=TRACE, frontier=self.FRONTIER,
             )
         self.assertEqual(reasoning, "LLM structured guard")
         self.assertIn("# LLM_GUARD zone=0 act=1 x=4268", code)
@@ -51,19 +53,24 @@ class StructuredMutationTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             code, reasoning = mutator.mutate_policy(
                 WORKING, "Sonic got stuck (zone 0 act 1)", "shot.png", [],
-                coordinate_trace=TRACE,
+                coordinate_trace=TRACE, frontier=self.FRONTIER,
             )
         self.assertEqual(reasoning, "freeform")
         self.assertIn("LEFT", code)
         self.assertEqual(mutator.proposal_calls, 1)
         self.assertEqual(mutator.freeform_calls, 1)
 
-    def test_no_trace_skips_structured_path_entirely(self):
-        # Without a known frontier the structured path must not fire -- this is
-        # what keeps the failure-routing behavior (and its tests) intact.
+    def test_no_explicit_frontier_skips_structured_path_entirely(self):
+        # The structured path requires the orchestrator's AUTHORITATIVE frontier:
+        # trace-tail coordinates sit at the respawn point after a death, and
+        # stagnation-escape generations (which pass no frontier) must explore a
+        # distinct strategy instead of being re-anchored at the plateau.
         mutator = make_mutator('{"action": "RIGHT,B", "hold_frames": 20}')
         with redirect_stdout(StringIO()):
-            _, reasoning = mutator.mutate_policy(WORKING, "Sonic got stuck", "shot.png", [])
+            _, reasoning = mutator.mutate_policy(
+                WORKING, "Stagnation plateau: try a distinct minimal strategy.",
+                "shot.png", [], coordinate_trace=TRACE,
+            )
         self.assertEqual(mutator.proposal_calls, 0)
         self.assertEqual(mutator.freeform_calls, 1)
         self.assertEqual(reasoning, "freeform")
@@ -93,7 +100,7 @@ class StructuredMutationTests(unittest.TestCase):
         with redirect_stdout(StringIO()):
             mutator.mutate_policy(
                 WORKING, "Policy code timeout (infinite loop).", "shot.png", [],
-                coordinate_trace=TRACE,
+                coordinate_trace=TRACE, frontier=self.FRONTIER,
             )
         self.assertEqual(mutator.proposal_calls, 0)
         self.assertEqual(mutator.freeform_calls, 1)

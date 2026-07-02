@@ -26,15 +26,13 @@ from core.diagnosis import (
     load_failure_window,
     window_key,
 )
-from core.escape_sweep import sweep_frontier_escapes
+from core.escape_sweep import battery_description, sweep_frontier_escapes
 from core.evaluation import build_policy_load_failure, evaluate_policy
 from core.frontier import (
     build_diagnosis_guard_candidate,
     build_frontier_guard_candidate,
-    diagnosis_guard_marker,
     experiment_position_gateable,
-    frontier_guard_marker,
-    llm_guard_marker,
+    new_guard_marker,
     recently_attempted_frontier_guard,
 )
 from core.fsio import atomic_write_text
@@ -194,13 +192,19 @@ def maybe_diagnose_frontier(
 
     key = window_key(window)
     if cache.get("key") == key:
-        stagnated_since = stagnation_counter - cache.get("stagnation_counter", 0)
-        found_escape = bool((cache.get("result") or {}).get("verified_experiments"))
-        if found_escape or stagnated_since < REDIAGNOSE_AFTER_STAGNANT_GENERATIONS:
+        # Staleness is OUR OWN monotonic serve-count. The loop's
+        # stagnation_counter cycles (it resets on promotion and at the
+        # stagnation-escape threshold), so deltas against it can go negative
+        # and permanently suppress re-diagnosis (agency review, confirmed).
+        # An unchanged window also means a cached "verified escape" never
+        # actually promoted -- it is as stale as a no-escape result and gets
+        # the same fresh budget instead of pinning the cache forever.
+        cache["served"] = cache.get("served", 0) + 1
+        if cache["served"] < REDIAGNOSE_AFTER_STAGNANT_GENERATIONS:
             return cache.get("result")
         print(
-            f"Frontier still stuck after {stagnated_since} more generations; "
-            "re-running agentic diagnosis with a fresh experiment budget."
+            f"Frontier unchanged after {cache['served']} more generations; "
+            "re-running the sweep + agentic diagnosis with a fresh experiment budget."
         )
 
     # Mechanical escape sweep first: dozens of canonical inputs replayed at the
@@ -219,13 +223,17 @@ def maybe_diagnose_frontier(
             persist_diagnosis_report(result, frontier.get("failure_reason"), report_path=report_path)
             cache["key"] = key
             cache["result"] = result
-            cache["stagnation_counter"] = stagnation_counter
+            cache["served"] = 0
             return result
+        # Generated from the battery constants so it can never drift from what
+        # actually ran, and phrased to inform rather than steer: variations of
+        # standard moves (different timings, offsets, waits) remain fair game.
         sweep_note = (
-            "\nNote: a mechanical sweep already replayed the standard escapes at this "
-            "frontier (RIGHT,B holds, RIGHT,UP,B high jump, RIGHT,DOWN roll, run-up "
-            "jumps with 30/60/120-frame runways) and NONE beat it. Spend your "
-            "experiments on genuinely different approaches."
+            "\nNote: a mechanical sweep already replayed these exact inputs at this "
+            f"frontier and NONE beat it -- {battery_description()}. "
+            "Untried variations (different timings, start offsets, waiting for "
+            "hazard cycles) and genuinely different approaches are both worth "
+            "your experiments; do not repeat the exact inputs above."
         )
 
     session = None
@@ -251,7 +259,7 @@ def maybe_diagnose_frontier(
 
     cache["key"] = key
     cache["result"] = result
-    cache["stagnation_counter"] = stagnation_counter
+    cache["served"] = 0
     return result
 
 
@@ -406,7 +414,7 @@ def generate_candidates(
     ):
         guard = build_diagnosis_guard_candidate(working_code, experiment)
         if guard is not None and not recently_attempted_frontier_guard(
-            diagnosis_guard_marker(guard), recent_history
+            new_guard_marker(working_code, guard), recent_history
         ):
             deterministic = guard
             reasoning_label = "Diagnosed guard (verified input)"
@@ -415,7 +423,7 @@ def generate_candidates(
     if deterministic is None:
         frontier_guard = build_frontier_guard_candidate(working_code, last_trace)
         if frontier_guard is not None and not recently_attempted_frontier_guard(
-            frontier_guard_marker(frontier_guard),
+            new_guard_marker(working_code, frontier_guard),
             recent_history,
         ):
             deterministic = frontier_guard
@@ -791,11 +799,11 @@ def run_evaluation_loop(
                     if candidate_bk2_path != latest_bk2:
                         os.rename(latest_bk2, candidate_bk2_path)
 
-            marker = (
-                frontier_guard_marker(new_code)
-                or diagnosis_guard_marker(new_code)
-                or llm_guard_marker(new_code)
-            )
+            # The candidate's OWN marker is the one it introduced over the code
+            # it was built from -- a type-priority search over the whole file
+            # recorded a stale promoted marker instead, silently breaking the
+            # retry dedupe (agency review, confirmed by both skeptics).
+            marker = new_guard_marker(working_code, new_code)
             if reasoning in (
                 "Deterministic frontier guard",
                 "Diagnosed guard (verified input)",
@@ -882,6 +890,16 @@ def run_evaluation_loop(
                 best_candidate_fitness = min(best_candidate_fitness, retest_fitness)
                 if not confirmed:
                     best_candidate_promotable = False
+            else:
+                # An unconfirmable gain must not become the champion: silently
+                # falling back to single-eval promotion re-opened the exact
+                # fluke-promotion hole the retest exists to close (agency
+                # review). The candidate is regenerated next generation anyway.
+                print(
+                    "Retest could not run; withholding promotion of "
+                    f"{best_candidate_fitness:.2f} (unconfirmed against bar {working_fitness:.2f})."
+                )
+                best_candidate_promotable = False
 
         promoted = best_candidate_promotable and best_candidate_fitness > working_fitness
         # Only a promoted run may replace the persisted diagnosis window: a
@@ -945,7 +963,13 @@ def run_evaluation_loop(
             print(f"No candidate beat the working policy ({working_fitness:.2f}). Stagnation counter: {stagnation_counter + 1}")
             stagnation_counter += 1
 
-            if "fatal" in best_candidate_reason.lower() or "stuck" in best_candidate_reason.lower() or "timeout" in best_candidate_reason.lower():
+            # "lost a life" is the death-behind-frontier classification; its
+            # reason text carries the authoritative frontier coordinates the
+            # lesson extractor needs (agency review: the trigger missed it).
+            if any(
+                token in best_candidate_reason.lower()
+                for token in ("fatal", "stuck", "timeout", "lost a life")
+            ):
                 print("Extracting a lesson learned from this failure...")
                 try:
                     mutator.extract_lesson(best_candidate_reason, best_candidate_trace)

@@ -82,6 +82,30 @@ def frontier_guard_marker(code):
     return match.group(0) if match else None
 
 
+_ALL_MARKERS = re.compile(r"# (?:FRONTIER|DIAGNOSIS|LLM)_GUARD zone=\S+ act=\S+ x=-?\d+")
+
+
+def guard_markers(code):
+    """Every guard marker of every type present in ``code``."""
+    return set(_ALL_MARKERS.findall(code or ""))
+
+
+def new_guard_marker(base_code, candidate_code):
+    """The marker a guard candidate INTRODUCED over the code it was built from.
+
+    Candidates inherit every previously promoted guard marker, and markers of
+    all types coexist, so searching the candidate by type priority (or by text
+    position — insertion lands *below* the previous guard's marker comment)
+    records a stale marker. That broke PR #17's retry dedupe: failed guards
+    were re-built and re-evaluated every generation, and legitimate new
+    frontier guards were spuriously suppressed by their promoted predecessor's
+    marker (agency review, confirmed). The set difference is type- and
+    position-independent.
+    """
+    introduced = guard_markers(candidate_code) - guard_markers(base_code)
+    return sorted(introduced)[0] if introduced else None
+
+
 def _insert_guard_lines(working_code, guard_body_lines):
     """Insert guard lines at the top of get_action, preserving indentation."""
     try:

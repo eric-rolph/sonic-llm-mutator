@@ -115,6 +115,50 @@ class SettledVerificationTests(unittest.TestCase):
         self.assertFalse(result["passed_frontier_x"])
         self.assertIn("DIED", result["text"])
 
+    def test_extra_life_cannot_mask_a_later_death(self):
+        # Lives 3 -> 4 (1-up) -> 3 (death): comparing to the START lives saw
+        # 3 >= 3 and verified a fatal trajectory (agency review). Per-frame
+        # decrement detection catches the death.
+        class OneUpThenDeathEnv(DeathZoneEnv):
+            def step(self, action):
+                if action[7]:
+                    self.x += 10
+                if self.x == 4100:
+                    self.lives += 1  # 1-up monitor
+                if self.x >= 4500:
+                    self.lives -= 1
+                    self.x = 0
+                return None, 0, False, {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = OneUpThenDeathEnv()
+            session = make_session(tmp, env)
+            result = session.try_actions(600, "RIGHT", 40)  # peaks 4400, dies in settle
+
+        self.assertFalse(result["passed_frontier_x"])
+        self.assertEqual(session.verified_experiments, [])
+
+    def test_cross_act_experiment_never_verifies(self):
+        # x is only comparable within one act: a snapshot from a different
+        # zone/act can "beat" frontier_x with a meaningless coordinate.
+        class WrongActEnv(DeathZoneEnv):
+            def get_state(self):
+                state = super().get_state()
+                state["act"] = 0  # failure window is act 1
+                return state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = WrongActEnv()
+            session = make_session(tmp, env)
+            # make_session stamps failure zone=0 act=1; window snapshots were
+            # recorded via env (act=0), so the seek lands in the wrong act.
+            session.window["failure"]["zone"] = 0
+            session.window["failure"]["act"] = 1
+            result = session.try_actions(600, "RIGHT", 40)  # x 4000 -> 4400 > 4268
+
+        self.assertFalse(result["passed_frontier_x"])
+        self.assertEqual(session.verified_experiments, [])
+
     def test_sequence_survivable_still_verifies(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = DeathZoneEnv(death_x=None)
