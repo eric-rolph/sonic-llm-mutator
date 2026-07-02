@@ -350,7 +350,11 @@ class FrontierDiagnosisGatingTests(unittest.TestCase):
             diagnose(4)
             self.assertEqual(mutator.calls, 2)  # re-cached against the new milestone
 
-    def test_frontier_with_verified_escape_is_not_rediagnosed(self):
+    def test_verified_escape_cache_is_served_then_refreshed_while_frontier_stays(self):
+        # An UNCHANGED window means the cached "verified escape" never actually
+        # promoted -- it must not pin the cache forever (agency review: the old
+        # found_escape short-circuit disabled re-diagnosis permanently). The
+        # cached result is served while fresh, then a fresh budget runs.
         class CountingMutator:
             def __init__(self):
                 self.calls = 0
@@ -380,7 +384,7 @@ class FrontierDiagnosisGatingTests(unittest.TestCase):
             cache = {}
             report_path = os.path.join(tmp, "latest_report.json")
             with redirect_stdout(StringIO()):
-                for stagnation in range(8):
+                results = [
                     maybe_diagnose_frontier(
                         mutator,
                         frontier,
@@ -389,8 +393,14 @@ class FrontierDiagnosisGatingTests(unittest.TestCase):
                         report_path=report_path,
                         stagnation_counter=stagnation,
                     )
+                    for stagnation in range(8)
+                ]
 
-        self.assertEqual(mutator.calls, 1)  # the escape is already in hand
+        # Initial diagnosis, then a fresh budget after every
+        # REDIAGNOSE_AFTER_STAGNANT_GENERATIONS cached serves: 8 gens -> 3 runs.
+        self.assertEqual(mutator.calls, 3)
+        # The cached escape is still SERVED between refreshes, never dropped.
+        self.assertTrue(all(r and r.get("verified_experiments") for r in results))
 
     def test_diagnosis_exception_is_cached_as_none(self):
         class ExplodingSessionFactory:

@@ -417,6 +417,23 @@ class DiagnosisSession:
         except (TypeError, ValueError):
             return self.failure_x()
 
+    def _failure_zone_act(self):
+        """The failure's (zone, act), or None for legacy windows without them."""
+        failure = self.window.get("failure", {})
+        try:
+            return (int(failure["zone"]), int(failure["act"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _matches_failure_act(self, info):
+        """x is only comparable within one act: an experiment started from a
+        snapshot in a DIFFERENT zone/act can 'beat' frontier_x with a
+        meaningless coordinate (agency review, confirmed)."""
+        expected = self._failure_zone_act()
+        if expected is None:
+            return True
+        return (info.get("zone"), info.get("act")) == expected
+
     def describe_window(self):
         """Compact text table of the available moments, newest last."""
         failure = self.window.get("failure", {})
@@ -508,14 +525,19 @@ class DiagnosisSession:
             frames_done = 0
             ended_early = False
             died = False
+            # Per-frame decrement detection: comparing against the START lives
+            # lets a mid-experiment 1-up mask a later death (3 -> 4 -> 3 still
+            # >= start), verifying a fatal trajectory (agency review).
+            prev_lives = start["lives"]
             for _ in range(hold):
                 obs, reward, done, info = env.step(action)
                 frames_done += 1
                 current = _info_subset(env.get_state())
                 max_x = max(max_x, current["x_pos"])
-                if current["lives"] < start["lives"]:
+                if current["lives"] < prev_lives:
                     died = True
                     break
+                prev_lives = current["lives"]
                 if done:
                     ended_early = True
                     break
@@ -528,16 +550,22 @@ class DiagnosisSession:
                     settle_done += 1
                     current = _info_subset(env.get_state())
                     max_x = max(max_x, current["x_pos"])
-                    if current["lives"] < start["lives"]:
+                    if current["lives"] < prev_lives:
                         died = True
                         break
+                    prev_lives = current["lives"]
                     if done:
                         ended_early = True
                         break
             end = _info_subset(env.get_state())
             shot = self._take_screenshot(env, f"try_{snapshot['frame']}")
             offset = self.failure_frame() - int(snapshot.get("frame", 0))
-            passed_frontier_x = max_x > self.frontier_x() and not died and not ended_early
+            passed_frontier_x = (
+                max_x > self.frontier_x()
+                and not died
+                and not ended_early
+                and self._matches_failure_act(start)
+            )
             if passed_frontier_x:
                 self.verified_experiments.append(
                     {
@@ -602,6 +630,7 @@ class DiagnosisSession:
             max_x = start["x_pos"]
             ended_early = False
             died = False
+            prev_lives = start["lives"]  # per-frame decrement detection (see try_actions)
             played = []
             for segment in normalized:
                 segment_start = _info_subset(env.get_state())
@@ -612,9 +641,10 @@ class DiagnosisSession:
                     frames_done += 1
                     current = _info_subset(env.get_state())
                     max_x = max(max_x, current["x_pos"])
-                    if current["lives"] < start["lives"]:
+                    if current["lives"] < prev_lives:
                         died = True
                         break
+                    prev_lives = current["lives"]
                     if done:
                         ended_early = True
                         break
@@ -639,9 +669,10 @@ class DiagnosisSession:
                     settle_done += 1
                     current = _info_subset(env.get_state())
                     max_x = max(max_x, current["x_pos"])
-                    if current["lives"] < start["lives"]:
+                    if current["lives"] < prev_lives:
                         died = True
                         break
+                    prev_lives = current["lives"]
                     if done:
                         ended_early = True
                         break
@@ -649,7 +680,12 @@ class DiagnosisSession:
             end = _info_subset(env.get_state())
             shot = self._take_screenshot(env, f"seq_{snapshot['frame']}")
             offset = self.failure_frame() - int(snapshot.get("frame", 0))
-            passed_frontier_x = max_x > self.frontier_x() and not died and not ended_early
+            passed_frontier_x = (
+                max_x > self.frontier_x()
+                and not died
+                and not ended_early
+                and self._matches_failure_act(start)
+            )
             if passed_frontier_x:
                 self.verified_experiments.append(
                     {
