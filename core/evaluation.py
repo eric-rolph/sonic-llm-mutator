@@ -29,6 +29,11 @@ LEVEL_SETTLE_FRAMES = 150
 # (~8s at 60fps). Counted in frames (not loop iterations) so the threshold is
 # unaffected by action_repeat.
 STUCK_FRAME_LIMIT = 500
+# When the stuck detector fires this far behind the act's max-x after a death,
+# the run really ended with a DEATH AT THE FRONTIER (respawn puts Sonic behind
+# his own max-x, which the stuck counter can never beat). Classifying that as
+# "stuck at the respawn x" aimed diagnosis and guards at the wrong coordinates.
+FRONTIER_RESPAWN_MARGIN = 200
 
 
 def build_policy_load_failure(error):
@@ -78,6 +83,8 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
     settle_frames_left = 0
     settle_origin_x = 0
     runtime_error = None
+    deaths = 0
+    last_lives = None
 
     current_vision_context = "UNKNOWN"
 
@@ -280,16 +287,38 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
             if snapshot_sink is not None:
                 snapshot_sink.record(env, frames_alive, state, act_max_x=max_x)
 
+            lives_now = state.get("lives")
+            if isinstance(lives_now, int):
+                if isinstance(last_lives, int) and lives_now < last_lives:
+                    deaths += 1
+                last_lives = lives_now
+
             if stuck_counter > STUCK_FRAME_LIMIT:
-                if verbose:
-                    print("Sonic got stuck! Terminating run.")
                 done = True
-                level_suffix = ""
+                current_x = int(state.get("x_pos", 0) or 0)
+                zone_label = ""
                 if zone_act and zone_act[0] is not None:
-                    level_suffix = f" (zone {zone_act[0]} act {zone_act[1]})"
-                # "stuck" keyword routes this to the local code model (a physics/
-                # logic bug) and triggers lesson extraction.
-                failure_reason = "Sonic got stuck: stopped making forward progress for 8 seconds." + level_suffix
+                    zone_label = f"zone {zone_act[0]} act {zone_act[1]}"
+                if deaths > 0 and max_x - current_x > FRONTIER_RESPAWN_MARGIN:
+                    # A death at the frontier, not a physical stall: the respawn
+                    # put Sonic behind his own max-x, which the stuck counter can
+                    # never beat. Report the REAL frontier so diagnosis and
+                    # guards aim at the death spot, not the respawn point.
+                    # ("lost a life" keeps this diagnosable + vision-routed.)
+                    if verbose:
+                        print(f"Sonic died at the frontier (x={max_x}) and respawned behind it. Terminating run.")
+                    failure_reason = (
+                        f"Sonic lost a life at the frontier ({zone_label}, x={max_x}) "
+                        f"and respawned behind it (run ended at x={current_x})."
+                    )
+                else:
+                    if verbose:
+                        print("Sonic got stuck! Terminating run.")
+                    # "stuck" keeps the existing lesson-extraction/routing.
+                    failure_reason = (
+                        "Sonic got stuck: stopped making forward progress for 8 seconds."
+                        + (f" ({zone_label})" if zone_label else "")
+                    )
                 break
     finally:
         runner.close()
@@ -328,6 +357,13 @@ def evaluate_policy(env, policy, mutator, max_frames=5000, verbose=True, action_
             levels_cleared=levels_cleared,
             cumulative_distance=cumulative_distance,
         )
+
+    # Authoritative frontier for downstream guard/diagnosis targeting. After a
+    # death-then-respawn the trace tail sits at the respawn point, so consumers
+    # that aim at "where the run actually got blocked" must use this instead.
+    if runtime_error is None and zone_act and zone_act[0] is not None:
+        components = dict(components)
+        components["frontier"] = {"zone": zone_act[0], "act": zone_act[1], "x": int(max_x)}
 
     screenshot_path = capture_screenshot(env)
     montage_path = build_screenshot_montage(

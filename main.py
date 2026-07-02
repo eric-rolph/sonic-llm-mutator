@@ -349,6 +349,7 @@ def generate_candidates(
     parent_selector=None,
     diagnosis_report=None,
     verified_experiments=None,
+    frontier=None,
 ):
     """Request ``n_candidates`` new policies from the mutator.
 
@@ -428,6 +429,7 @@ def generate_candidates(
                     temperature,
                     last_trace,
                     diagnosis_report,
+                    frontier=frontier,
                 )
             futures[future] = c
 
@@ -626,6 +628,7 @@ def run_evaluation_loop(
         "trace": baseline_context["last_trace"],
         "screenshot": preserve_frontier_screenshot(baseline_context["last_screenshot"]),
         "window": persist_frontier_window(baseline_ring, baseline_context["last_failure_reason"]),
+        "frontier": baseline_context.get("components", {}).get("frontier"),
     }
     seed_population_baseline(population, working_path, baseline_context)
 
@@ -697,6 +700,7 @@ def run_evaluation_loop(
             parent_selector=population.select_parent_codes,
             diagnosis_report=diagnosis_report,
             verified_experiments=verified_experiments,
+            frontier=mutation_frontier.get("frontier"),
         )
 
         # Evaluate candidates
@@ -861,6 +865,7 @@ def run_evaluation_loop(
                 if promoted
                 else best_candidate_screenshot,
                 "window": candidate_window,
+                "frontier": best_candidate_components.get("frontier"),
             },
             promoted=promoted,
         )

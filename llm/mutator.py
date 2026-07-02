@@ -1021,7 +1021,7 @@ hold_frames: how long to hold it -- ~12 for a hop, ~25 for a full jump, ~40 to r
             return None
         return guard
 
-    def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None, diagnosis_report=None):
+    def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None, diagnosis_report=None, frontier=None):
         history_text = json.dumps(recent_history, indent=2)
         diagnosis_text = ""
         if diagnosis_report:
@@ -1038,6 +1038,17 @@ hold_frames: how long to hold it -- ~12 for a hop, ~25 for a full jump, ~40 to r
             if len(coordinate_trace) > 0:
                 current_x = trace_entry_x(coordinate_trace[-1])
                 current_zone, current_act = trace_entry_zone_act(coordinate_trace[-1])
+
+        # The evaluator's authoritative frontier beats the trace tail: after a
+        # death-then-respawn the trace tail sits at the RESPAWN point, and a
+        # guard (or lesson lookup) aimed there misses the death spot entirely.
+        if isinstance(frontier, dict):
+            try:
+                current_zone = int(frontier["zone"])
+                current_act = int(frontier["act"])
+                current_x = int(frontier["x"])
+            except (KeyError, TypeError, ValueError):
+                pass
 
         # Prefer a structured, champion-preserving guard: the model proposes only
         # WHAT to try (buttons + hold duration); the coordinates stay authoritative

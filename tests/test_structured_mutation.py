@@ -68,6 +68,24 @@ class StructuredMutationTests(unittest.TestCase):
         self.assertEqual(mutator.freeform_calls, 1)
         self.assertEqual(reasoning, "freeform")
 
+    def test_explicit_frontier_overrides_respawn_trace_tail(self):
+        # After a death-then-respawn the trace tail is at the RESPAWN point
+        # (x~332); the guard must target the authoritative frontier (x=4268).
+        respawn_trace = [{"zone": 0, "act": 1, "x": 332, "x_velocity": 0.0, "action": "RIGHT"}]
+        mutator = make_mutator('{"action": "RIGHT,B", "hold_frames": 25}')
+        with redirect_stdout(StringIO()):
+            code, reasoning = mutator.mutate_policy(
+                WORKING,
+                "Sonic lost a life at the frontier (zone 0 act 1, x=4268) and respawned behind it.",
+                "shot.png",
+                [],
+                coordinate_trace=respawn_trace,
+                frontier={"zone": 0, "act": 1, "x": 4268},
+            )
+        self.assertEqual(reasoning, "LLM structured guard")
+        self.assertIn("# LLM_GUARD zone=0 act=1 x=4268", code)  # death spot
+        self.assertNotIn("x=332", code)                          # not the respawn point
+
     def test_code_timeout_skips_structured_path(self):
         # A code fault (timeout) is not a geometry problem; go straight to the
         # code model rewrite.

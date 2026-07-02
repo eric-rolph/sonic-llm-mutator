@@ -21,6 +21,7 @@ from core.fsio import atomic_write_text
 
 SNAPSHOT_INTERVAL = 60        # frames between captures (~1 s at 60 fps)
 SNAPSHOT_CAPACITY = 10        # ring depth: ~10 s of history before failure
+FRONTIER_PIN_CAPACITY = 4     # savestates pinned at the act frontier (see ring)
 TRY_ACTIONS_MAX_FRAMES = 300  # hard cap per counterfactual rollout (~5 s)
 SEQUENCE_MAX_SEGMENTS = 5     # segments per try_action_sequence experiment
 SEQUENCE_MAX_FRAMES = 600     # total frames per sequence experiment (~10 s)
@@ -49,7 +50,8 @@ def _info_subset(state):
 class FailureSnapshotRing:
     """Rolling savestates captured during one evaluation episode."""
 
-    def __init__(self, interval=SNAPSHOT_INTERVAL, capacity=SNAPSHOT_CAPACITY):
+    def __init__(self, interval=SNAPSHOT_INTERVAL, capacity=SNAPSHOT_CAPACITY,
+                 frontier_capacity=FRONTIER_PIN_CAPACITY):
         self.interval = max(1, int(interval))
         self.capacity = max(1, int(capacity))
         self.snapshots = []
@@ -62,6 +64,18 @@ class FailureSnapshotRing:
         self._max_x_zone_act = None
         self._last_frame = None
         self.disabled = False
+        # Savestates PINNED at the act frontier, exempt from trailing eviction.
+        # The trailing window only covers the last ~10s; when Sonic dies at the
+        # frontier and respawns at a checkpoint, that window slides past the
+        # death moment entirely (live-observed: frontier_x=4268 recorded, but
+        # every surviving snapshot was post-respawn at x<=332, so no experiment
+        # could ever pass the frontier and diagnosis was structurally unable to
+        # find an escape). Pins keep the moments just before max-x stopped
+        # improving so experiments can rewind to the real frontier.
+        self.frontier_capacity = max(1, int(frontier_capacity))
+        self.frontier_snapshots = []
+        self._pinned_max_x = -1
+        self._pin_zone_act = None
 
     def record(self, env, frame, state, act_max_x=None):
         """Capture a savestate at the cadence. Never raises into evaluation.
@@ -101,14 +115,28 @@ class FailureSnapshotRing:
             self.disabled = True
             return False
         self._last_frame = frame
-        self.snapshots.append(
-            {
-                "frame": int(frame),
-                "state_bytes": state_bytes,
-                "info": _info_subset(state),
-            }
-        )
+        snapshot = {
+            "frame": int(frame),
+            "state_bytes": state_bytes,
+            "info": info,
+        }
+        self.snapshots.append(snapshot)
         del self.snapshots[: -self.capacity]
+
+        # Pin the frontier: while max-x is still improving, every capture is the
+        # newest "at the frontier" moment. When progress stops (death/stall) the
+        # pins freeze, preserving the moments just before the frontier even
+        # after the trailing window slides past them. Pins reset per act — a
+        # cleared act's frontier is no longer the target.
+        pin_zone_act = (info["zone"], info["act"])
+        if self._pin_zone_act != pin_zone_act:
+            self._pin_zone_act = pin_zone_act
+            self.frontier_snapshots = []
+            self._pinned_max_x = -1
+        if self.max_x_seen > self._pinned_max_x:
+            self._pinned_max_x = self.max_x_seen
+            self.frontier_snapshots.append(snapshot)
+            del self.frontier_snapshots[: -self.frontier_capacity]
         return True
 
     def persist(self, directory=DEFAULT_WINDOW_DIR, failure_reason="", final_state=None, failure_frame=None):
@@ -140,13 +168,24 @@ class FailureSnapshotRing:
             "failure": failure,
             "snapshots": [],
         }
+        # Merge frontier pins with the trailing window (dedup by frame, sorted
+        # ascending — _nearest_snapshot relies on that order). Without the pins,
+        # a death-then-respawn at the frontier leaves only post-respawn
+        # savestates and experiments can never reach frontier_x.
+        pinned_frames = {s["frame"] for s in self.frontier_snapshots}
+        merged = {s["frame"]: s for s in self.frontier_snapshots}
         for snapshot in self.snapshots:
+            merged.setdefault(snapshot["frame"], snapshot)
+        for frame in sorted(merged):
+            snapshot = merged[frame]
             filename = f"{snapshot['frame']}.state"
             with open(os.path.join(directory, filename), "wb") as f:
                 f.write(snapshot["state_bytes"])
             entry = dict(snapshot["info"])
             entry["frame"] = snapshot["frame"]
             entry["file"] = filename
+            if snapshot["frame"] in pinned_frames:
+                entry["frontier"] = True
             manifest["snapshots"].append(entry)
 
         atomic_write_text(
@@ -378,10 +417,15 @@ class DiagnosisSession:
         failure_frame = self.failure_frame()
         for snapshot in self.window.get("snapshots", []):
             offset = failure_frame - int(snapshot.get("frame", 0))
+            frontier_tag = (
+                "  <-- AT THE RUN'S FRONTIER (experiment from here to beat it)"
+                if snapshot.get("frontier")
+                else ""
+            )
             lines.append(
                 f"- offset={offset} frames: x={snapshot.get('x_pos', 0)} y={snapshot.get('y_pos', 0)} "
                 f"zone={snapshot.get('zone', 0)} act={snapshot.get('act', 0)} "
-                f"rings={snapshot.get('rings', 0)} lives={snapshot.get('lives', 0)}"
+                f"rings={snapshot.get('rings', 0)} lives={snapshot.get('lives', 0)}" + frontier_tag
             )
         lines.append(
             f"Failure moment: frame={failure.get('frame', '?')} x={failure.get('x_pos', '?')} "

@@ -19,9 +19,11 @@ class FakeMutator:
         self.parent_pairs = []
         self.diagnosis_reports = []
 
-    def mutate_policy(self, code, reason, screenshot, history, temperature, trace, diagnosis_report=None):
+    def mutate_policy(self, code, reason, screenshot, history, temperature, trace, diagnosis_report=None, frontier=None):
         self.mutate_calls += 1
         self.diagnosis_reports.append(diagnosis_report)
+        self.frontiers = getattr(self, "frontiers", [])
+        self.frontiers.append(frontier)
         return f"# mutation t={temperature}", "mutated"
 
     def crossover_policies(self, parent_a, parent_b, history, temperature=0.7):
