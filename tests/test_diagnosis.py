@@ -235,12 +235,14 @@ class DiagnosisSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             session, env = self.make_session(tmp)
 
-            # From frame 180 (x=360), holding RIGHT for 30 frames -> x=660 > 400.
+            # From frame 180 (x=360), holding RIGHT for 30 frames -> x=660 > 400,
+            # then the survival-settle keeps holding for VERIFY_SETTLE_FRAMES
+            # (90) more -> x=1560 in this linear env.
             result = session.try_actions(20, "RIGHT", 30)
 
             self.assertTrue(result["ok"])
             self.assertTrue(result["passed_frontier_x"])
-            self.assertIn("x: 360 -> 660", result["text"])
+            self.assertIn("x: 360 -> 1560", result["text"])
             self.assertIn("YES", result["text"])
 
             # Stalling input never beats the frontier.
@@ -267,9 +269,17 @@ class DiagnosisSessionTests(unittest.TestCase):
             window = load_failure_window(window_dir)
             self.assertEqual(window["failure"]["frontier_x"], 1000)
 
+            # Wall the env at 660 so the survival-settle cannot outrun the
+            # frontier: the experiment genuinely peaks at 660 < 1000.
+            class WalledEnv(FakeSavestateEnv):
+                def step(self, action):
+                    result = super().step(action)
+                    self.x = min(self.x, 660)
+                    return result
+
             session = DiagnosisSession(
                 window,
-                env_factory=lambda: FakeSavestateEnv(),
+                env_factory=lambda: WalledEnv(),
                 screenshot_dir=os.path.join(tmp, "shots"),
             )
             result = session.try_actions(20, "RIGHT", 30)  # x 360 -> 660
@@ -289,7 +299,9 @@ class DiagnosisSessionTests(unittest.TestCase):
         experiment = session.verified_experiments[0]
         self.assertEqual(experiment["actions"], "RIGHT")
         self.assertEqual(experiment["start_x"], 360)
-        self.assertEqual(experiment["max_x"], 660)
+        # max_x includes the survival-settle (same input held 90 more frames);
+        # hold_frames records only the SCRIPTED input for faithful replay.
+        self.assertEqual(experiment["max_x"], 1560)
         self.assertEqual(experiment["zone"], 0)
         self.assertEqual(experiment["act"], 1)
         self.assertEqual(experiment["hold_frames"], 30)
@@ -316,7 +328,8 @@ class DiagnosisSessionTests(unittest.TestCase):
         self.assertEqual(len(experiment["segments"]), 2)
         self.assertEqual(experiment["segments"][0]["start_x"], 360)
         self.assertEqual(experiment["segments"][1]["start_x"], 560)
-        self.assertEqual(experiment["max_x"], 660)
+        # 660 after the scripted segments + 90 settle frames of the last input.
+        self.assertEqual(experiment["max_x"], 1560)
 
     def test_try_action_sequence_rejects_empty_and_caps_totals(self):
         with tempfile.TemporaryDirectory() as tmp:

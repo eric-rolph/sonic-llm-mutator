@@ -19,9 +19,11 @@ class FakeMutator:
         self.parent_pairs = []
         self.diagnosis_reports = []
 
-    def mutate_policy(self, code, reason, screenshot, history, temperature, trace, diagnosis_report=None):
+    def mutate_policy(self, code, reason, screenshot, history, temperature, trace, diagnosis_report=None, frontier=None):
         self.mutate_calls += 1
         self.diagnosis_reports.append(diagnosis_report)
+        self.frontiers = getattr(self, "frontiers", [])
+        self.frontiers.append(frontier)
         return f"# mutation t={temperature}", "mutated"
 
     def crossover_policies(self, parent_a, parent_b, history, temperature=0.7):
@@ -261,16 +263,18 @@ class GenerateCandidatesTests(unittest.TestCase):
         candidate = build_diagnosis_guard_candidate(working, experiment)
 
         self.assertIn("# DIAGNOSIS_GUARD zone=0 act=1 x=2350", candidate)
-        # Replay anchors on the first crossing of the start x...
-        self.assertIn("2325 <= state.get(\"x_pos\", 0) <= 2375", candidate)
-        # ...then plays the measured frame counts: jump segment holds B for
-        # its full 40 frames (x-thresholds released it after a few frames,
-        # turning a verified full jump into a short hop).
+        # The B-less run-up is POSITION-gated (band-entry-anchored timed
+        # run-ups fell short of the measured launch point when the band was
+        # entered early -- live-observed 4272 verified vs 4263 replayed)...
+        self.assertIn("2325 <= _diag_x < 2460", candidate)
+        # ...and the timed replay anchors exactly at the measured launch x,
+        # holding the jump for its full measured 40 frames (x-thresholds
+        # released B after a few frames, turning a full jump into a hop).
+        self.assertIn("2460 <= _diag_x <= 2485", candidate)
         self.assertIn("global _DIAG_REPLAY_0_1_2350", candidate)
-        self.assertIn("if _DIAG_REPLAY_0_1_2350 < 90:", candidate)
-        self.assertIn("if _DIAG_REPLAY_0_1_2350 < 130:", candidate)
+        self.assertIn("if _DIAG_REPLAY_0_1_2350 <= 40:", candidate)
         self.assertIn('return "RIGHT,B"', candidate)
-        self.assertIn("_DIAG_REPLAY_0_1_2350 < 190", candidate)  # total budget
+        self.assertIn("_DIAG_REPLAY_0_1_2350 < 100", candidate)  # timed budget
         # The compiled candidate must still load in the restricted runtime.
         from core.policy_validator import validate_policy_source
         validate_policy_source(candidate)
@@ -301,16 +305,21 @@ class GenerateCandidatesTests(unittest.TestCase):
             path.write_text(candidate, encoding="utf-8")
             policy = load_policy(str(path))
 
-            # Inside the guard's x-band and act, the replay drives the segments
-            # by frame count regardless of the exact x each frame.
-            state = {"zone": 0, "act": 1, "x_pos": 2400}
-            actions = [policy.get_action(dict(state)) for _ in range(7)]
+            # The run-up is POSITION-gated: any x short of the measured launch
+            # point keeps returning the run-up action without consuming the
+            # timer. Crossing the launch x anchors the timed replay, which then
+            # drives the jump/travel segments by frame count.
+            xs = [2400, 2405, 2412, 2430, 2450, 2470, 2480, 2500]
+            actions = [
+                policy.get_action({"zone": 0, "act": 1, "x_pos": x}) for x in xs
+            ]
 
-        # 3x RIGHT, then 2x RIGHT,B (the full held jump), then 2x RIGHT, then
-        # the counter is spent and control returns to the base policy (RIGHT).
+        # 3x positional run-up, then 2x RIGHT,B (the full held jump), then 2x
+        # RIGHT, then the timer is spent and control returns to the base policy.
         self.assertEqual(actions[:3], ["RIGHT", "RIGHT", "RIGHT"])
         self.assertEqual(actions[3:5], ["RIGHT,B", "RIGHT,B"])
         self.assertEqual(actions[5:7], ["RIGHT", "RIGHT"])
+        self.assertEqual(actions[7], "RIGHT")  # base policy (guard consumed)
 
     def test_sequence_guard_compiles_backward_runups_too(self):
         # Frame replay does not need x-monotonic boundaries, so back-up-then-

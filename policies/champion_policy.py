@@ -2,21 +2,75 @@ def get_action(state):
     # FRONTIER_GUARD zone=0 act=1 x=1077
     # DIAGNOSIS_GUARD zone=0 act=1 x=2393
     # DIAGNOSIS_GUARD zone=0 act=1 x=3928
+    # DIAGNOSIS_GUARD zone=0 act=1 x=3593
+    # DIAGNOSIS_GUARD zone=0 act=1 x=4341
+    # LLM_GUARD zone=0 act=1 x=4341
+    global _LLM_REPLAY_0_1_4341
+    if '_LLM_REPLAY_0_1_4341' not in globals():
+        _LLM_REPLAY_0_1_4341 = -1
+    if (
+        state.get("zone") == 0
+        and state.get("act") == 1
+        and _LLM_REPLAY_0_1_4341 < 15
+        and (_LLM_REPLAY_0_1_4341 >= 0 or 4316 <= state.get("x_pos", 0) <= 4366)
+    ):
+        _LLM_REPLAY_0_1_4341 = _LLM_REPLAY_0_1_4341 + 1
+        return "RIGHT"
+
+    if (
+        state.get("zone") == 0
+        and state.get("act") == 1
+        and 4316 <= state.get("x_pos", 0) < 4737
+    ):
+        return "RIGHT,B"
+
+    global _DIAG_PHASE_0_1_3593, _DIAG_REPLAY_0_1_3593
+    if '_DIAG_PHASE_0_1_3593' not in globals():
+        _DIAG_PHASE_0_1_3593 = -1
+        _DIAG_REPLAY_0_1_3593 = -1
+    if (
+        state.get("zone") == 0
+        and state.get("act") == 1
+        and _DIAG_REPLAY_0_1_3593 < 165
+    ):
+        _diag_x = state.get("x_pos", 0)
+        if _DIAG_PHASE_0_1_3593 < 0 and 3568 <= _diag_x <= 3618:
+            _DIAG_PHASE_0_1_3593 = 0
+        if _DIAG_PHASE_0_1_3593 >= 0:
+            if _DIAG_PHASE_0_1_3593 == 0:
+                if _diag_x > 3559:
+                    return "LEFT"
+                _DIAG_PHASE_0_1_3593 = 1
+            if _DIAG_PHASE_0_1_3593 == 1:
+                if _diag_x < 3920:
+                    return "RIGHT"
+                _DIAG_PHASE_0_1_3593 = 2
+            if _DIAG_PHASE_0_1_3593 == 2 and _DIAG_REPLAY_0_1_3593 < 0:
+                _DIAG_REPLAY_0_1_3593 = 0
+            if _DIAG_REPLAY_0_1_3593 >= 0:
+                _DIAG_REPLAY_0_1_3593 = _DIAG_REPLAY_0_1_3593 + 1
+                if _DIAG_REPLAY_0_1_3593 <= 45:
+                    return "RIGHT,B"
+                return "RIGHT"
+
     global _DIAG_REPLAY_0_1_3928
     if '_DIAG_REPLAY_0_1_3928' not in globals():
         _DIAG_REPLAY_0_1_3928 = -1
     if (
         state.get("zone") == 0
         and state.get("act") == 1
-        and _DIAG_REPLAY_0_1_3928 < 340
-        and (_DIAG_REPLAY_0_1_3928 >= 0 or 3903 <= state.get("x_pos", 0) <= 3953)
+        and _DIAG_REPLAY_0_1_3928 < 165
     ):
-        _DIAG_REPLAY_0_1_3928 = _DIAG_REPLAY_0_1_3928 + 1
-        if _DIAG_REPLAY_0_1_3928 < 200:
+        _diag_x = state.get("x_pos", 0)
+        if _DIAG_REPLAY_0_1_3928 < 0 and 3903 <= _diag_x < 4053:
             return "RIGHT"
-        if _DIAG_REPLAY_0_1_3928 < 240:
-            return "RIGHT,B"
-        return "RIGHT"
+        if _DIAG_REPLAY_0_1_3928 < 0 and 4053 <= _diag_x <= 4078:
+            _DIAG_REPLAY_0_1_3928 = 0
+        if _DIAG_REPLAY_0_1_3928 >= 0:
+            _DIAG_REPLAY_0_1_3928 = _DIAG_REPLAY_0_1_3928 + 1
+            if _DIAG_REPLAY_0_1_3928 <= 45:
+                return "RIGHT,B"
+            return "RIGHT"
 
     global _DIAG_REPLAY_0_1_2393
     if '_DIAG_REPLAY_0_1_2393' not in globals():

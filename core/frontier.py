@@ -161,12 +161,16 @@ def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
 
     segments = experiment.get("segments") or []
     if len(segments) >= 2:
-        # Compile a timed sequence as FRAME REPLAY anchored on the first
-        # crossing of the sequence's start x. The deterministic emulator and
-        # unchanged approach code reproduce the arrival state, so replaying
-        # the measured frame counts is faithful — unlike x-threshold dispatch,
-        # which live testing showed releases B after the few frames it takes
-        # to cross a band, turning the verified full jump into a short hop.
+        # Compile a timed sequence as FRAME REPLAY. The jump and everything
+        # after it must be TIME-held (x-threshold dispatch releases B after the
+        # few frames it takes to cross a band, turning a verified full jump
+        # into a short hop). But anchoring the whole replay on band ENTRY is
+        # position-sloppy: entering the +/-25 band early makes a timed run-up
+        # fall short of the measured launch point (live-observed: verified
+        # escape reached x=4272, the compiled replay peaked at 4263 and died).
+        # So when the first segment is a plain B-less run-up and the second
+        # segment's measured start_x is known, gate the run-up BY POSITION and
+        # anchor the timed replay exactly at the measured launch x.
         cleaned = []
         for segment in segments:
             seg_actions = _valid_actions(segment.get("actions") if isinstance(segment, dict) else None)
@@ -176,10 +180,128 @@ def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
                 return None
             if seg_actions is None:
                 return None
-            cleaned.append((seg_frames, seg_actions))
-        total_frames = sum(frames for frames, _ in cleaned)
+            seg_start_x = None
+            if isinstance(segment, dict):
+                try:
+                    seg_start_x = int(segment["start_x"])
+                except (KeyError, TypeError, ValueError):
+                    seg_start_x = None
+            cleaned.append((seg_frames, seg_actions, seg_start_x))
+
+        # The survival settle is part of the VERIFIED trajectory (the input was
+        # held through it and Sonic lived): replay it too, instead of handing
+        # control back to the base policy 90 frames early (live-observed: the
+        # verified run reached x=4917 holding RIGHT through the settle; the
+        # compiled guard handed back after the scripted input and the base
+        # policy died at 4351).
+        try:
+            settle_extra = int(experiment.get("settle_frames", 0) or 0)
+        except (TypeError, ValueError):
+            settle_extra = 0
+        settle_extra = max(0, min(settle_extra, 300))
+        if settle_extra and cleaned:
+            last_frames, last_actions, last_start = cleaned[-1]
+            cleaned[-1] = (last_frames + settle_extra, last_actions, last_start)
 
         counter = f"_DIAG_REPLAY_{zone}_{act}_{start_x}"
+        launch_x = cleaned[1][2]
+        position_gated = (
+            "B" not in cleaned[0][1]
+            and launch_x is not None
+            and launch_x > start_x
+        )
+        if position_gated:
+            timed = cleaned[1:]
+            total_frames = sum(frames for frames, _, _ in timed)
+            body = [
+                f"global {counter}",
+                f"if {counter!r} not in globals():",
+                f"    {counter} = -1",
+                "if (",
+                f"    state.get(\"zone\") == {zone!r}",
+                f"    and state.get(\"act\") == {act!r}",
+                f"    and {counter} < {total_frames}",
+                "):",
+                "    _diag_x = state.get(\"x_pos\", 0)",
+                f"    if {counter} < 0 and {lower} <= _diag_x < {launch_x}:",
+                f"        return \"{cleaned[0][1]}\"",  # position-gated run-up
+                f"    if {counter} < 0 and {launch_x} <= _diag_x <= {launch_x + x_radius}:",
+                f"        {counter} = 0",  # anchor exactly at the measured launch
+                f"    if {counter} >= 0:",
+                f"        {counter} = {counter} + 1",
+            ]
+            threshold = 0
+            for seg_frames, seg_actions, _ in timed[:-1]:
+                threshold += seg_frames
+                body.append(f"        if {counter} <= {threshold}:")
+                body.append(f"            return \"{seg_actions}\"")
+            body.append(f"        return \"{timed[-1][1]}\"")
+            guard_lines = [marker] + body
+            return _insert_guard_lines(working_code, guard_lines)
+
+        # General PHASE MACHINE for sequences whose leading segments are B-less
+        # travel with measured boundaries (e.g. back-up-then-charge-then-jump):
+        # each travel phase holds its input BY POSITION until the next
+        # segment's measured start x, then the timed replay anchors at the
+        # first B segment. Live-observed: the backward escape verified at
+        # x=4917 but its band-anchored time replay peaked at 4258 -- entry slop
+        # compounds across a back-up, so time alone cannot reproduce it.
+        first_b = next((i for i, (_, acts, _) in enumerate(cleaned) if "B" in acts), None)
+        phases_usable = (
+            first_b is not None
+            and first_b >= 1
+            and all(cleaned[i][2] is not None for i in range(first_b + 1))
+        )
+        if phases_usable:
+            phase_var = f"_DIAG_PHASE_{zone}_{act}_{start_x}"
+            timed = cleaned[first_b:]
+            total_frames = sum(frames for frames, _, _ in timed)
+            body = [
+                f"global {phase_var}, {counter}",
+                f"if {phase_var!r} not in globals():",
+                f"    {phase_var} = -1",
+                f"    {counter} = -1",
+                "if (",
+                f"    state.get(\"zone\") == {zone!r}",
+                f"    and state.get(\"act\") == {act!r}",
+                f"    and {counter} < {total_frames}",
+                "):",
+                "    _diag_x = state.get(\"x_pos\", 0)",
+                f"    if {phase_var} < 0 and {lower} <= _diag_x <= {start_x + x_radius}:",
+                f"        {phase_var} = 0",
+                f"    if {phase_var} >= 0:",
+            ]
+            for i in range(first_b):
+                _, seg_actions, seg_start = cleaned[i]
+                boundary = cleaned[i + 1][2]
+                if boundary != seg_start:
+                    comparison = ">" if boundary < seg_start else "<"
+                    body += [
+                        f"        if {phase_var} == {i}:",
+                        f"            if _diag_x {comparison} {boundary}:",
+                        f"                return \"{seg_actions}\"",
+                        f"            {phase_var} = {i + 1}",
+                    ]
+                else:
+                    body += [
+                        f"        if {phase_var} == {i}:",
+                        f"            {phase_var} = {i + 1}",
+                    ]
+            body += [
+                f"        if {phase_var} == {first_b} and {counter} < 0:",
+                f"            {counter} = 0",
+                f"        if {counter} >= 0:",
+                f"            {counter} = {counter} + 1",
+            ]
+            threshold = 0
+            for seg_frames, seg_actions, _ in timed[:-1]:
+                threshold += seg_frames
+                body.append(f"            if {counter} <= {threshold}:")
+                body.append(f"                return \"{seg_actions}\"")
+            body.append(f"            return \"{timed[-1][1]}\"")
+            return _insert_guard_lines(working_code, [marker] + body)
+
+        total_frames = sum(frames for frames, _, _ in cleaned)
         body = [
             f"global {counter}",
             f"if {counter!r} not in globals():",
@@ -193,7 +315,7 @@ def build_diagnosis_guard_candidate(working_code, experiment, x_radius=25):
             f"    {counter} = {counter} + 1",
         ]
         threshold = 0
-        for seg_frames, seg_actions in cleaned[:-1]:
+        for seg_frames, seg_actions, _ in cleaned[:-1]:
             threshold += seg_frames
             body.append(f"    if {counter} < {threshold}:")
             body.append(f"        return \"{seg_actions}\"")
@@ -237,6 +359,114 @@ def _strip_guard_block(code, marker_text, max_block_lines=40):
 
 def diagnosis_guard_marker(code):
     match = re.search(r"# DIAGNOSIS_GUARD zone=\S+ act=\S+ x=-?\d+", code or "")
+    return match.group(0) if match else None
+
+
+def experiment_position_gateable(experiment):
+    """True when the experiment compiles into a position-faithful guard.
+
+    B-less travel run-ups with measured boundaries (forward or backward) replay
+    by POSITION (position gate / phase machine), which live testing showed is
+    faithful; anything else falls back to band-anchored TIME replay, whose
+    band-entry slop repeatedly missed precision jumps (verified x=4917 replayed
+    as x=4258). Candidate selection prefers gateable experiments even at
+    slightly lower verified max_x.
+    """
+    segments = (experiment or {}).get("segments") or []
+    if len(segments) < 2:
+        return True  # single holds compile to x-threshold guards (positional)
+    first_b = None
+    for index, segment in enumerate(segments):
+        if "B" in str((segment or {}).get("actions", "")):
+            first_b = index
+            break
+    if first_b is None or first_b < 1:
+        return False  # all-travel or jump-first: time replay only
+    for segment in segments[: first_b + 1]:
+        try:
+            int(segment["start_x"])
+        except (KeyError, TypeError, ValueError):
+            return False
+    return True
+
+
+def build_llm_guard_candidate(working_code, proposal, x_radius=25):
+    """Compile an UNVERIFIED structured model proposal into a preserving guard.
+
+    Unlike a free-form rewrite, a proposal can only PREPEND a narrow recovery
+    guard to the working policy; it can never regress the code that already
+    works. The model decides only WHAT to try (buttons, and optionally how many
+    frames to hold them); the WHERE (zone/act/x) comes from authoritative
+    emulator state, and the normal evaluation -- not the model -- confirms
+    whether it helps. Marked distinctly from a VERIFIED diagnosis guard so the
+    two never supersede each other.
+    """
+    if not isinstance(proposal, dict):
+        return None
+    try:
+        zone = int(proposal["zone"])
+        act = int(proposal["act"])
+        x = int(proposal["x"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    actions = _valid_actions(proposal.get("action", proposal.get("actions")))
+    if actions is None:
+        return None
+    try:
+        hold_frames = int(proposal.get("hold_frames", 0) or 0)
+    except (TypeError, ValueError):
+        hold_frames = 0
+    hold_frames = max(0, min(hold_frames, 300))
+
+    marker = f"# LLM_GUARD zone={zone} act={act} x={x}"
+    for existing_zone, existing_act, existing_x in re.findall(
+        r"# LLM_GUARD zone=(\S+) act=(\S+) x=(-?\d+)",
+        working_code,
+    ):
+        if (
+            existing_zone == str(zone)
+            and existing_act == str(act)
+            and abs(int(existing_x) - x) <= x_radius * 2
+        ):
+            return None
+
+    lower = x - x_radius
+    upper = x + x_radius
+    if hold_frames >= 1:
+        # Hold the proposed action for hold_frames once Sonic first reaches the
+        # band, mirroring the verified frame-replay guard (the deterministic
+        # emulator makes the replay faithful).
+        counter = "_LLM_REPLAY_" + f"{zone}_{act}_{x}".replace("-", "n")
+        body = [
+            marker,
+            f"global {counter}",
+            f"if {counter!r} not in globals():",
+            f"    {counter} = -1",
+            "if (",
+            f'    state.get("zone") == {zone!r}',
+            f'    and state.get("act") == {act!r}',
+            f"    and {counter} < {hold_frames}",
+            f'    and ({counter} >= 0 or {lower} <= state.get("x_pos", 0) <= {upper})',
+            "):",
+            f"    {counter} = {counter} + 1",
+            f'    return "{actions}"',
+        ]
+        return _insert_guard_lines(working_code, body)
+
+    body = [
+        marker,
+        "if (",
+        f'    state.get("zone") == {zone!r}',
+        f'    and state.get("act") == {act!r}',
+        f'    and {lower} <= state.get("x_pos", 0) <= {upper}',
+        "):",
+        f'    return "{actions}"',
+    ]
+    return _insert_guard_lines(working_code, body)
+
+
+def llm_guard_marker(code):
+    match = re.search(r"# LLM_GUARD zone=\S+ act=\S+ x=-?\d+", code or "")
     return match.group(0) if match else None
 
 

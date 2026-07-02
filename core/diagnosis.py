@@ -21,9 +21,16 @@ from core.fsio import atomic_write_text
 
 SNAPSHOT_INTERVAL = 60        # frames between captures (~1 s at 60 fps)
 SNAPSHOT_CAPACITY = 10        # ring depth: ~10 s of history before failure
+FRONTIER_PIN_CAPACITY = 4     # savestates pinned at the act frontier (see ring)
 TRY_ACTIONS_MAX_FRAMES = 300  # hard cap per counterfactual rollout (~5 s)
 SEQUENCE_MAX_SEGMENTS = 5     # segments per try_action_sequence experiment
 SEQUENCE_MAX_FRAMES = 600     # total frames per sequence experiment (~10 s)
+# After the scripted input ends, keep stepping this long to prove the escape is
+# SURVIVABLE. Live-observed loophole: a jump peaked past the frontier (x=4272 >
+# 4268) but Sonic was falling into a wider pit; the death landed after the
+# experiment horizon, and since ended_early only fires at lives==0 the doomed
+# trajectory VERIFIED and was compiled into the champion.
+VERIFY_SETTLE_FRAMES = 90
 
 # The emulator methods DiagnosisSession invokes through ProcessDiagnosisEnv.
 # This tuple IS the proxy contract -- the single place to edit when the
@@ -49,7 +56,8 @@ def _info_subset(state):
 class FailureSnapshotRing:
     """Rolling savestates captured during one evaluation episode."""
 
-    def __init__(self, interval=SNAPSHOT_INTERVAL, capacity=SNAPSHOT_CAPACITY):
+    def __init__(self, interval=SNAPSHOT_INTERVAL, capacity=SNAPSHOT_CAPACITY,
+                 frontier_capacity=FRONTIER_PIN_CAPACITY):
         self.interval = max(1, int(interval))
         self.capacity = max(1, int(capacity))
         self.snapshots = []
@@ -62,6 +70,18 @@ class FailureSnapshotRing:
         self._max_x_zone_act = None
         self._last_frame = None
         self.disabled = False
+        # Savestates PINNED at the act frontier, exempt from trailing eviction.
+        # The trailing window only covers the last ~10s; when Sonic dies at the
+        # frontier and respawns at a checkpoint, that window slides past the
+        # death moment entirely (live-observed: frontier_x=4268 recorded, but
+        # every surviving snapshot was post-respawn at x<=332, so no experiment
+        # could ever pass the frontier and diagnosis was structurally unable to
+        # find an escape). Pins keep the moments just before max-x stopped
+        # improving so experiments can rewind to the real frontier.
+        self.frontier_capacity = max(1, int(frontier_capacity))
+        self.frontier_snapshots = []
+        self._pinned_max_x = -1
+        self._pin_zone_act = None
 
     def record(self, env, frame, state, act_max_x=None):
         """Capture a savestate at the cadence. Never raises into evaluation.
@@ -101,14 +121,28 @@ class FailureSnapshotRing:
             self.disabled = True
             return False
         self._last_frame = frame
-        self.snapshots.append(
-            {
-                "frame": int(frame),
-                "state_bytes": state_bytes,
-                "info": _info_subset(state),
-            }
-        )
+        snapshot = {
+            "frame": int(frame),
+            "state_bytes": state_bytes,
+            "info": info,
+        }
+        self.snapshots.append(snapshot)
         del self.snapshots[: -self.capacity]
+
+        # Pin the frontier: while max-x is still improving, every capture is the
+        # newest "at the frontier" moment. When progress stops (death/stall) the
+        # pins freeze, preserving the moments just before the frontier even
+        # after the trailing window slides past them. Pins reset per act — a
+        # cleared act's frontier is no longer the target.
+        pin_zone_act = (info["zone"], info["act"])
+        if self._pin_zone_act != pin_zone_act:
+            self._pin_zone_act = pin_zone_act
+            self.frontier_snapshots = []
+            self._pinned_max_x = -1
+        if self.max_x_seen > self._pinned_max_x:
+            self._pinned_max_x = self.max_x_seen
+            self.frontier_snapshots.append(snapshot)
+            del self.frontier_snapshots[: -self.frontier_capacity]
         return True
 
     def persist(self, directory=DEFAULT_WINDOW_DIR, failure_reason="", final_state=None, failure_frame=None):
@@ -140,13 +174,24 @@ class FailureSnapshotRing:
             "failure": failure,
             "snapshots": [],
         }
+        # Merge frontier pins with the trailing window (dedup by frame, sorted
+        # ascending — _nearest_snapshot relies on that order). Without the pins,
+        # a death-then-respawn at the frontier leaves only post-respawn
+        # savestates and experiments can never reach frontier_x.
+        pinned_frames = {s["frame"] for s in self.frontier_snapshots}
+        merged = {s["frame"]: s for s in self.frontier_snapshots}
         for snapshot in self.snapshots:
+            merged.setdefault(snapshot["frame"], snapshot)
+        for frame in sorted(merged):
+            snapshot = merged[frame]
             filename = f"{snapshot['frame']}.state"
             with open(os.path.join(directory, filename), "wb") as f:
                 f.write(snapshot["state_bytes"])
             entry = dict(snapshot["info"])
             entry["frame"] = snapshot["frame"]
             entry["file"] = filename
+            if snapshot["frame"] in pinned_frames:
+                entry["frontier"] = True
             manifest["snapshots"].append(entry)
 
         atomic_write_text(
@@ -323,11 +368,15 @@ class DiagnosisSession:
     or a broken backend can never take down the training loop.
     """
 
-    def __init__(self, window, env_factory=None, screenshot_dir=DEFAULT_SCREENSHOT_DIR):
+    def __init__(self, window, env_factory=None, screenshot_dir=DEFAULT_SCREENSHOT_DIR,
+                 capture_screenshots=True):
         self.window = window
         self._env_factory = env_factory or _default_env_factory
         self._env = None
         self.screenshot_dir = screenshot_dir
+        # Mechanical sweeps run dozens of experiments; skipping the per-call
+        # screenshot write keeps them pure emulator compute.
+        self.capture_screenshots = bool(capture_screenshots)
         self._shot_count = 0
         self.last_screenshot = None
         # Experiments that measurably beat the run's frontier. These are the
@@ -378,10 +427,15 @@ class DiagnosisSession:
         failure_frame = self.failure_frame()
         for snapshot in self.window.get("snapshots", []):
             offset = failure_frame - int(snapshot.get("frame", 0))
+            frontier_tag = (
+                "  <-- AT THE RUN'S FRONTIER (experiment from here to beat it)"
+                if snapshot.get("frontier")
+                else ""
+            )
             lines.append(
                 f"- offset={offset} frames: x={snapshot.get('x_pos', 0)} y={snapshot.get('y_pos', 0)} "
                 f"zone={snapshot.get('zone', 0)} act={snapshot.get('act', 0)} "
-                f"rings={snapshot.get('rings', 0)} lives={snapshot.get('lives', 0)}"
+                f"rings={snapshot.get('rings', 0)} lives={snapshot.get('lives', 0)}" + frontier_tag
             )
         lines.append(
             f"Failure moment: frame={failure.get('frame', '?')} x={failure.get('x_pos', '?')} "
@@ -408,6 +462,8 @@ class DiagnosisSession:
         return env
 
     def _take_screenshot(self, env, tag):
+        if not self.capture_screenshots:
+            return None
         os.makedirs(self.screenshot_dir, exist_ok=True)
         path = os.path.join(self.screenshot_dir, f"diagnosis_{self._shot_count:02d}_{tag}.png")
         self._shot_count += 1
@@ -451,19 +507,38 @@ class DiagnosisSession:
             max_x = start["x_pos"]
             frames_done = 0
             ended_early = False
+            died = False
             for _ in range(hold):
                 obs, reward, done, info = env.step(action)
                 frames_done += 1
-                current_x = _info_subset(env.get_state())["x_pos"]
-                max_x = max(max_x, current_x)
+                current = _info_subset(env.get_state())
+                max_x = max(max_x, current["x_pos"])
+                if current["lives"] < start["lives"]:
+                    died = True
+                    break
                 if done:
                     ended_early = True
                     break
+            # Settle: keep holding the same input to prove the escape is
+            # SURVIVABLE, not a doomed arc whose death lands past the horizon.
+            settle_done = 0
+            if not died and not ended_early:
+                for _ in range(VERIFY_SETTLE_FRAMES):
+                    obs, reward, done, info = env.step(action)
+                    settle_done += 1
+                    current = _info_subset(env.get_state())
+                    max_x = max(max_x, current["x_pos"])
+                    if current["lives"] < start["lives"]:
+                        died = True
+                        break
+                    if done:
+                        ended_early = True
+                        break
             end = _info_subset(env.get_state())
             shot = self._take_screenshot(env, f"try_{snapshot['frame']}")
             offset = self.failure_frame() - int(snapshot.get("frame", 0))
-            passed_frontier_x = max_x > self.frontier_x()
-            if passed_frontier_x and not ended_early:
+            passed_frontier_x = max_x > self.frontier_x() and not died and not ended_early
+            if passed_frontier_x:
                 self.verified_experiments.append(
                     {
                         "zone": start["zone"],
@@ -471,6 +546,9 @@ class DiagnosisSession:
                         "start_x": start["x_pos"],
                         "actions": str(actions),
                         "hold_frames": frames_done,
+                        # The settle is part of the SURVIVED trajectory: guards
+                        # replay it too before handing back to the base policy.
+                        "settle_frames": settle_done,
                         "max_x": max_x,
                         "frames_before_failure": offset,
                     }
@@ -479,8 +557,9 @@ class DiagnosisSession:
                 f"Held '{actions}' for {frames_done} frames starting {offset} frames before the failure. "
                 f"x: {start['x_pos']} -> {end['x_pos']} (max {max_x}), y: {start['y_pos']} -> {end['y_pos']}, "
                 f"rings: {start['rings']} -> {end['rings']}, lives: {start['lives']} -> {end['lives']}. "
-                f"Beat the run's furthest progress (frontier x={self.frontier_x()}): "
+                f"Beat the run's furthest progress (frontier x={self.frontier_x()}) AND survived: "
                 f"{'YES — VERIFIED ESCAPE, this input will be compiled into a candidate policy' if passed_frontier_x else 'no'}."
+                + (" Sonic DIED on this trajectory — not a survivable escape." if died else "")
                 + (" The episode ended during this experiment (death or level end)." if ended_early else "")
             )
             return {"ok": True, "text": text, "screenshot": shot, "passed_frontier_x": passed_frontier_x}
@@ -522,6 +601,7 @@ class DiagnosisSession:
             start = _info_subset(env.get_state())
             max_x = start["x_pos"]
             ended_early = False
+            died = False
             played = []
             for segment in normalized:
                 segment_start = _info_subset(env.get_state())
@@ -530,7 +610,11 @@ class DiagnosisSession:
                 for _ in range(segment["frames"]):
                     obs, reward, done, info = env.step(action)
                     frames_done += 1
-                    max_x = max(max_x, _info_subset(env.get_state())["x_pos"])
+                    current = _info_subset(env.get_state())
+                    max_x = max(max_x, current["x_pos"])
+                    if current["lives"] < start["lives"]:
+                        died = True
+                        break
                     if done:
                         ended_early = True
                         break
@@ -542,14 +626,31 @@ class DiagnosisSession:
                         "start_y": segment_start["y_pos"],
                     }
                 )
-                if ended_early:
+                if ended_early or died:
                     break
+
+            # Settle with the final segment's input to prove the escape is
+            # SURVIVABLE (see VERIFY_SETTLE_FRAMES).
+            settle_done = 0
+            if not died and not ended_early and played:
+                settle_action = action_string_to_array(played[-1]["actions"])
+                for _ in range(VERIFY_SETTLE_FRAMES):
+                    obs, reward, done, info = env.step(settle_action)
+                    settle_done += 1
+                    current = _info_subset(env.get_state())
+                    max_x = max(max_x, current["x_pos"])
+                    if current["lives"] < start["lives"]:
+                        died = True
+                        break
+                    if done:
+                        ended_early = True
+                        break
 
             end = _info_subset(env.get_state())
             shot = self._take_screenshot(env, f"seq_{snapshot['frame']}")
             offset = self.failure_frame() - int(snapshot.get("frame", 0))
-            passed_frontier_x = max_x > self.frontier_x()
-            if passed_frontier_x and not ended_early:
+            passed_frontier_x = max_x > self.frontier_x() and not died and not ended_early
+            if passed_frontier_x:
                 self.verified_experiments.append(
                     {
                         "zone": start["zone"],
@@ -558,6 +659,9 @@ class DiagnosisSession:
                         "actions": played[0]["actions"],
                         "segments": played,
                         "hold_frames": sum(p["frames"] for p in played),
+                        # The settle is part of the SURVIVED trajectory: guards
+                        # replay it too before handing back to the base policy.
+                        "settle_frames": settle_done,
                         "max_x": max_x,
                         "frames_before_failure": offset,
                     }
@@ -568,8 +672,9 @@ class DiagnosisSession:
             text = (
                 f"Played sequence [{steps_text}] starting {offset} frames before the failure. "
                 f"x: {start['x_pos']} -> {end['x_pos']} (max {max_x}), y: {start['y_pos']} -> {end['y_pos']}. "
-                f"Beat the run's furthest progress (frontier x={self.frontier_x()}): "
+                f"Beat the run's furthest progress (frontier x={self.frontier_x()}) AND survived: "
                 f"{'YES — VERIFIED ESCAPE, this sequence will be compiled into a candidate policy' if passed_frontier_x else 'no'}."
+                + (" Sonic DIED on this trajectory — not a survivable escape." if died else "")
                 + (" The episode ended during this experiment (death or level end)." if ended_early else "")
             )
             return {"ok": True, "text": text, "screenshot": shot, "passed_frontier_x": passed_frontier_x}

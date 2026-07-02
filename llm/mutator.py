@@ -10,6 +10,11 @@ import sys
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from core.frontier import (
+    build_llm_guard_candidate,
+    llm_guard_marker,
+    recently_attempted_frontier_guard,
+)
 from core.fsio import atomic_write_text
 from core.policy_validator import validate_skills_source
 from core.trace_context import trace_entry_x, trace_entry_zone_act
@@ -70,8 +75,95 @@ def extract_json_object(text):
     return None
 
 
+def _parses(code):
+    try:
+        ast.parse(code)
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
+def _defines_get_action(code):
+    """True if ``code`` parses as Python and defines a top-level get_action."""
+    if not _parses(code):
+        return False
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "get_action"
+        for node in ast.parse(code).body
+    )
+
+
+def extract_python_block(raw_response, predicate=_parses):
+    """Pull working source out of a (possibly reasoning-model) response.
+
+    Reasoning models such as Gemma emit several fenced blocks in their
+    scratchpad -- partial drafts, the final version, sometimes an example. The
+    old heuristic took the *last* fenced block unconditionally, which frequently
+    grabbed a truncated draft and produced a SyntaxError. Instead, return the
+    last fenced block satisfying ``predicate``; only if none qualifies fall back
+    to the previous last-block/raw behavior so downstream validation/repair
+    still gets *something* rather than silently dropping the model's output.
+    """
+    if not raw_response:
+        return ""
+
+    blocks = [b.strip() for b in re.findall(r"```(?:python)?\s*\n?(.*?)```", raw_response, re.DOTALL)]
+    blocks = [b for b in blocks if b]
+
+    for block in reversed(blocks):
+        if predicate(block):
+            return block
+
+    stripped = raw_response.strip()
+    if predicate(stripped):
+        return stripped
+
+    if blocks:
+        return blocks[-1]
+    return stripped
+
+
+def extract_policy_code(raw_response):
+    """The last fenced block that parses AND defines a top-level get_action."""
+    return extract_python_block(raw_response, predicate=_defines_get_action)
+
+
+def slim_history(recent_history, max_reasoning_chars=200):
+    """Compact history for prompts: keep only what informs the next mutation.
+
+    Full history entries carry archive paths, screenshot paths, and unbounded
+    reasoning text; serialized whole they overflowed a local model's 8k context
+    (live-observed: 'n_keep: 8387 >= n_ctx: 8192'), failing the call outright.
+    """
+    slimmed = []
+    for entry in recent_history or []:
+        if not isinstance(entry, dict):
+            continue
+        keep = {}
+        for key in ("generation", "fitness", "failure_reason"):
+            if key in entry:
+                keep[key] = entry[key]
+        reasoning = str(entry.get("llm_reasoning", "") or "")
+        if reasoning:
+            keep["llm_reasoning"] = reasoning[:max_reasoning_chars]
+        components = entry.get("components")
+        if isinstance(components, dict):
+            frontier = components.get("frontier")
+            if frontier is not None:
+                keep["frontier"] = frontier
+            if "levels_cleared" in components:
+                keep["levels_cleared"] = components["levels_cleared"]
+        slimmed.append(keep)
+    return slimmed
+
+
 # Hard cap on stored lessons; oldest entries are dropped beyond this.
 MAX_SEMANTIC_LESSONS = 100
+
+# Mutation prompts must fit a local model's context window WITH headroom for the
+# system prompt and the response (live-observed hard 400s at n_ctx=8192).
+# ~22k chars =~ 6.3k tokens.
+PROMPT_CHAR_BUDGET = 22_000
 
 # Ordered keyword buckets for collapsing the LLM's freeform hazard names
 # ("Wall/Ledge", "Vertical stuck loop", "Pitfall", ...) into a small category
@@ -817,15 +909,26 @@ Here is the current skill library:
 Extract any clear, reusable logic from the successful policy into standalone Python functions (skills).
 Return ONLY valid Python code containing the updated skill library (the existing skills plus any new ones). Do NOT include `get_action`.
 """
+        if len(prompt) > PROMPT_CHAR_BUDGET:
+            # A grown champion + library can overflow a local context window.
+            # The merge below dedups by function name, so asking for only NEW
+            # functions (library omitted) is safe.
+            prompt = f"""
+We have discovered a highly successful AI policy:
+```python
+{policy_code}
+```
+
+Extract any clear, reusable logic from the successful policy into standalone Python functions (skills).
+Return ONLY valid Python code containing the NEW functions. Do NOT include `get_action`.
+"""
         new_skills_code, _ = self._call_micro_model(prompt, temperature=0.3)
 
         if new_skills_code:
             try:
-                if "```python" in new_skills_code:
-                    new_skills_code = new_skills_code.split("```python")[-1].split("```")[0].strip()
-                elif "```" in new_skills_code:
-                    parts = new_skills_code.split("```")
-                    new_skills_code = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
+                # Robust extraction: the last fenced block that actually parses
+                # (reasoning models leave truncated drafts in their scratchpad).
+                new_skills_code = extract_python_block(new_skills_code)
 
                 existing_functions = _top_level_functions(existing_skills)
                 new_functions = _top_level_functions(new_skills_code)
@@ -893,8 +996,85 @@ Return ONLY valid Python code containing the updated skill library (the existing
             except Exception as e:
                 print(f"Failed to save extracted skills: {e}")
 
-    def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None, diagnosis_report=None):
-        history_text = json.dumps(recent_history, indent=2)
+    def _request_guard_proposal(self, user_prompt, image_path, temperature):
+        """One raw model call returning a JSON guard proposal (not code).
+
+        Uses the vision model when a frame is available (a stuck frontier is a
+        visual problem), else the local code model. A dedicated system prompt is
+        needed because the normal SYSTEM_PROMPT asks for full policy code.
+        """
+        system = (
+            "You choose ONE controller input for a Sonic policy stuck at one spot. "
+            "Reply with ONLY a compact JSON object and nothing else."
+        )
+        use_vision = bool(image_path) and self.macro_client is not None
+        client = self.macro_client if use_vision else self.micro_client
+        model = self.macro_model if use_vision else self.micro_model
+        if use_vision:
+            user_content = [
+                {"type": "text", "text": user_prompt},
+                {"type": "image_url", "image_url": {"url": self._image_data_url(image_path)}},
+            ]
+        else:
+            user_content = user_prompt
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=temperature,
+            max_tokens=4096,  # reasoning models spend tokens before emitting the JSON
+            timeout=180,
+        )
+        return message_text(response.choices[0].message)
+
+    def _try_structured_guard(
+        self, current_code, failure_reason, screenshot_path, zone, act, x,
+        diagnosis_text, recent_history, temperature,
+    ):
+        """Ask for a structured {action, hold_frames} proposal and compile it
+        into a champion-preserving guard. Returns guard code, or None to fall
+        back to a full rewrite."""
+        prompt = f"""The working Sonic policy is STUCK and cannot get past one spot.
+
+Authoritative emulator state at the stall (from RAM -- exact, do not change):
+  zone={zone}, act={act}, x_pos={x}
+
+Failure: {failure_reason}
+{diagnosis_text}
+
+Look at the attached frame. Choose ONE input to try AT THAT SPOT to get Sonic moving forward past it.
+Reply with ONLY this JSON object (no prose, no code):
+{{"action": "<comma-separated buttons>", "hold_frames": <int 1-120>, "why": "<one short sentence>"}}
+
+Valid buttons: RIGHT, LEFT, UP, DOWN, B, A, C  (B is jump).
+Typical escapes: "RIGHT,B" (jump a wall/gap), "RIGHT,DOWN" (roll through), "RIGHT" (build speed), "RIGHT,UP,B" (higher jump).
+hold_frames: how long to hold it -- ~12 for a hop, ~25 for a full jump, ~40 to roll a stretch.
+
+[cache breaker {os.urandom(6).hex()}]"""
+        raw = self._request_guard_proposal(prompt, screenshot_path, temperature)
+        print(f"Structured guard proposal (raw): {repr(raw)[:200]}")
+        parsed = extract_json_object(raw)
+        if not isinstance(parsed, dict):
+            return None
+        proposal = {
+            "zone": zone,
+            "act": act,
+            "x": x,
+            "action": parsed.get("action") or parsed.get("actions"),
+            "hold_frames": parsed.get("hold_frames", 0),
+        }
+        guard = build_llm_guard_candidate(current_code, proposal)
+        if guard is None:
+            return None
+        if recently_attempted_frontier_guard(llm_guard_marker(guard), recent_history):
+            print("Structured guard already attempted recently; falling back to rewrite.")
+            return None
+        return guard
+
+    def mutate_policy(self, current_code, failure_reason, screenshot_path, recent_history, temperature=0.7, coordinate_trace=None, diagnosis_report=None, frontier=None):
+        history_text = json.dumps(slim_history(recent_history), indent=2)
         diagnosis_text = ""
         if diagnosis_report:
             diagnosis_text = (
@@ -910,6 +1090,35 @@ Return ONLY valid Python code containing the updated skill library (the existing
             if len(coordinate_trace) > 0:
                 current_x = trace_entry_x(coordinate_trace[-1])
                 current_zone, current_act = trace_entry_zone_act(coordinate_trace[-1])
+
+        # The evaluator's authoritative frontier beats the trace tail: after a
+        # death-then-respawn the trace tail sits at the RESPAWN point, and a
+        # guard (or lesson lookup) aimed there misses the death spot entirely.
+        if isinstance(frontier, dict):
+            try:
+                current_zone = int(frontier["zone"])
+                current_act = int(frontier["act"])
+                current_x = int(frontier["x"])
+            except (KeyError, TypeError, ValueError):
+                pass
+
+        # Prefer a structured, champion-preserving guard: the model proposes only
+        # WHAT to try (buttons + hold duration); the coordinates stay authoritative
+        # and the working code is never rewritten, only extended. Fall back to a
+        # full rewrite when there is no frontier, the fault is a code timeout, or
+        # the proposal does not compile into a fresh guard.
+        if "timeout" not in failure_reason.lower() and current_zone is not None and current_act is not None:
+            try:
+                guard = self._try_structured_guard(
+                    current_code, failure_reason, screenshot_path,
+                    current_zone, current_act, current_x,
+                    diagnosis_text, recent_history, temperature,
+                )
+            except Exception as e:
+                print(f"Structured guard proposal failed ({e}); falling back to rewrite.")
+                guard = None
+            if guard is not None:
+                return guard, "LLM structured guard"
 
         lessons_text = ""
         if os.path.exists("memory/semantic_bank.json"):
@@ -939,7 +1148,8 @@ Return ONLY valid Python code containing the updated skill library (the existing
             except Exception as e:
                 print(f"Error loading skills.py: {e}")
 
-        prompt = f"""
+        def build_prompt(history_block, lessons_block, skills_block):
+            return f"""
 Here is the current code that failed:
 ```python
 {current_code}
@@ -952,11 +1162,11 @@ Primary Failure Reason (the working policy's own frontier): {failure_reason}
 
 Recent History of Other Evaluated Candidates (background only; these failures
 may not apply to the current code):
-{history_text}
+{history_block}
 
-{lessons_text}
+{lessons_block}
 
-{skills_text}
+{skills_block}
 
 Note on Vision Context: The emulator now actively looks at the screen every 5 seconds. The immediate upcoming visual context is injected into `state['vision_context']` (e.g., 'ENEMY', 'CLEAR', 'SPIKES'). You can write logic to check this string!
 
@@ -977,6 +1187,21 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
 """
 
+        # Local models run with a finite context window and hard-fail past it
+        # (live-observed: 400 'n_keep >= n_ctx' at 8k as champions grow a guard
+        # per conquered frontier). Drop optional context in stages -- skills,
+        # then history, then lessons -- rather than fail the call outright. The
+        # failing code itself is never dropped.
+        prompt = build_prompt(history_text, lessons_text, skills_text)
+        for rebuild in (
+            lambda: build_prompt(history_text, lessons_text, ""),
+            lambda: build_prompt("[]", lessons_text, ""),
+            lambda: build_prompt("[]", "", ""),
+        ):
+            if len(prompt) <= PROMPT_CHAR_BUDGET:
+                break
+            prompt = rebuild()
+
         # Route by failure type. A pure code fault (an infinite loop caught as a
         # timeout), or having no frame to look at, goes to the local code model.
         # Everything else -- Sonic stuck against level geometry, or killed by a
@@ -990,15 +1215,8 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
         else:
             raw_response, reasoning = self._call_macro_model(prompt, screenshot_path, temperature)
 
-        # Clean up markdown if the LLM wrapped it anyway
         print(f"Raw Response from LLM (mutate): {repr(raw_response)}")
-        if "```python" in raw_response:
-            raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
-        elif "```" in raw_response:
-            parts = raw_response.split("```")
-            raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
-
-        return raw_response, reasoning
+        return extract_policy_code(raw_response), reasoning
 
     def repair_policy(self, candidate_code, validation_error):
         """Use the local code model once to repair an exact validator failure."""
@@ -1030,9 +1248,33 @@ optional allowed skills import followed by that function.
         return raw_response, reasoning
 
     def crossover_policies(self, policy_a_code, policy_b_code, recent_history, temperature=0.7):
-        history_text = json.dumps(recent_history, indent=2)
+        history_text = json.dumps(slim_history(recent_history), indent=2)
 
-        prompt = f"""
+        def build_prompt(history_block):
+            return self._crossover_prompt(policy_a_code, policy_b_code, history_block)
+
+        # Two grown champions can exceed a local model's context by themselves
+        # (live-observed 400s: guards accumulate ~20 lines per conquered
+        # frontier). Drop the optional history first; if the PARENTS alone
+        # overflow the budget, a faithful merge is impossible in-window --
+        # skip explicitly instead of hard-failing the call.
+        prompt = build_prompt(history_text)
+        if len(prompt) > PROMPT_CHAR_BUDGET:
+            prompt = build_prompt("[]")
+        if len(prompt) > PROMPT_CHAR_BUDGET:
+            raise ValueError(
+                "crossover parents exceed the prompt budget; skipping crossover"
+            )
+
+        raw_response, reasoning = self._call_micro_model(prompt, temperature)
+        reasoning = "FunSearch Crossover Offspring"
+
+        print(f"Raw Response from LLM (crossover): {repr(raw_response)}")
+        return extract_policy_code(raw_response), reasoning
+
+    @staticmethod
+    def _crossover_prompt(policy_a_code, policy_b_code, history_text):
+        return f"""
 We are performing an Evolutionary Algorithm Crossover. We have two highly successful policies (Parent A and Parent B) that each excel in different areas.
 
 Parent A Code:
@@ -1054,15 +1296,3 @@ Return ONLY valid Python code, starting with `def get_action(state):`.
 
 [SYSTEM CACHE BREAKER: {os.urandom(8).hex()} - Ignore this random string and DO NOT write it into your code.]
 """
-
-        raw_response, reasoning = self._call_micro_model(prompt, temperature)
-        reasoning = "FunSearch Crossover Offspring"
-
-        print(f"Raw Response from LLM (crossover): {repr(raw_response)}")
-        if "```python" in raw_response:
-            raw_response = raw_response.split("```python")[-1].split("```")[0].strip()
-        elif "```" in raw_response:
-            parts = raw_response.split("```")
-            raw_response = parts[-2].strip() if len(parts) >= 3 else parts[-1].strip()
-
-        return raw_response, reasoning

@@ -26,12 +26,15 @@ from core.diagnosis import (
     load_failure_window,
     window_key,
 )
+from core.escape_sweep import sweep_frontier_escapes
 from core.evaluation import build_policy_load_failure, evaluate_policy
 from core.frontier import (
     build_diagnosis_guard_candidate,
     build_frontier_guard_candidate,
     diagnosis_guard_marker,
+    experiment_position_gateable,
     frontier_guard_marker,
+    llm_guard_marker,
     recently_attempted_frontier_guard,
 )
 from core.fsio import atomic_write_text
@@ -169,6 +172,7 @@ def maybe_diagnose_frontier(
     session_factory=None,
     report_path=DIAGNOSIS_REPORT_PATH,
     stagnation_counter=0,
+    window_loader=None,
 ):
     """Run agentic diagnosis on the frontier; reuse while it is unchanged.
 
@@ -184,7 +188,7 @@ def maybe_diagnose_frontier(
     window_dir = frontier.get("window")
     if not window_dir or not diagnosable_failure(frontier.get("failure_reason")):
         return None
-    window = load_failure_window(window_dir)
+    window = (window_loader or load_failure_window)(window_dir)
     if window is None:
         return None
 
@@ -199,12 +203,39 @@ def maybe_diagnose_frontier(
             "re-running agentic diagnosis with a fresh experiment budget."
         )
 
+    # Mechanical escape sweep first: dozens of canonical inputs replayed at the
+    # frontier cost seconds of emulator compute and zero model calls. The vision
+    # session (minutes of model time, ~6 experiments) is reserved for obstacles
+    # the standard battery cannot beat.
+    sweep_note = ""
+    if os.environ.get("SONIC_ESCAPE_SWEEP", "1") != "0":
+        experiments, summary = sweep_frontier_escapes(window, session_factory=session_factory)
+        if experiments:
+            result = {
+                "report": summary,
+                "evidence_screenshot": None,
+                "verified_experiments": experiments,
+            }
+            persist_diagnosis_report(result, frontier.get("failure_reason"), report_path=report_path)
+            cache["key"] = key
+            cache["result"] = result
+            cache["stagnation_counter"] = stagnation_counter
+            return result
+        sweep_note = (
+            "\nNote: a mechanical sweep already replayed the standard escapes at this "
+            "frontier (RIGHT,B holds, RIGHT,UP,B high jump, RIGHT,DOWN roll, run-up "
+            "jumps with 30/60/120-frame runways) and NONE beat it. Spend your "
+            "experiments on genuinely different approaches."
+        )
+
     session = None
     try:
         build_session = session_factory or DiagnosisSession
         session = build_session(window)
         print("Running agentic failure diagnosis on the working frontier...")
-        result = mutator.diagnose_failure(session, frontier.get("failure_reason"), frontier.get("trace"))
+        result = mutator.diagnose_failure(
+            session, str(frontier.get("failure_reason") or "") + sweep_note, frontier.get("trace")
+        )
         if result:
             print("Diagnosis complete.")
             persist_diagnosis_report(result, frontier.get("failure_reason"), report_path=report_path)
@@ -348,6 +379,7 @@ def generate_candidates(
     parent_selector=None,
     diagnosis_report=None,
     verified_experiments=None,
+    frontier=None,
 ):
     """Request ``n_candidates`` new policies from the mutator.
 
@@ -363,10 +395,14 @@ def generate_candidates(
 
     deterministic = None
     reasoning_label = None
-    # A measured escape beats the heuristic recovery guard: try the best
-    # verified experiment (furthest measured x) first.
+    # A measured escape beats the heuristic recovery guard. Prefer experiments
+    # that compile into POSITION-faithful guards (forward run-ups / single
+    # holds) over band-anchored time replays, then the furthest measured x:
+    # live testing showed time-replay slop repeatedly missing precision jumps.
     for experiment in sorted(
-        verified_experiments or [], key=lambda e: e.get("max_x", 0), reverse=True
+        verified_experiments or [],
+        key=lambda e: (experiment_position_gateable(e), e.get("max_x", 0)),
+        reverse=True,
     ):
         guard = build_diagnosis_guard_candidate(working_code, experiment)
         if guard is not None and not recently_attempted_frontier_guard(
@@ -427,6 +463,7 @@ def generate_candidates(
                     temperature,
                     last_trace,
                     diagnosis_report,
+                    frontier=frontier,
                 )
             futures[future] = c
 
@@ -503,6 +540,42 @@ def resolve_working_fitness_floor(
             )
         return baseline_fitness
     return max(baseline_fitness, champion_fitness)
+
+
+def promotion_confirmed(original_fitness, retest_fitness, bar):
+    """A would-be promotion is only confirmed when the candidate beats the bar on
+    BOTH the original evaluation and a retest.
+
+    Evaluation has run-to-run variance (observed live: the same policy scoring
+    54397 or 50541 depending on get_action timing under load), so a single lucky
+    eval must not become the champion.
+    """
+    return original_fitness > bar and retest_fitness > bar
+
+
+def retest_candidate_fitness(env, mutator, candidate_path, max_frames, action_repeat):
+    """Re-evaluate a candidate once to confirm a fitness gain reproduces.
+
+    Returns the retest fitness, or None if it could not be run (the caller then
+    keeps the original single-eval decision).
+    """
+    try:
+        policy = load_policy(candidate_path)
+    except Exception as e:
+        print(f"Retest load failed: {e}")
+        return None
+    try:
+        return evaluate_policy(
+            env,
+            policy,
+            mutator,
+            max_frames,
+            action_repeat=action_repeat,
+            snapshot_sink=FailureSnapshotRing(),
+        )[0]
+    except Exception as e:
+        print(f"Retest eval failed: {e}")
+        return None
 
 
 def candidate_is_promotable(env, policy, components):
@@ -589,6 +662,7 @@ def run_evaluation_loop(
         "trace": baseline_context["last_trace"],
         "screenshot": preserve_frontier_screenshot(baseline_context["last_screenshot"]),
         "window": persist_frontier_window(baseline_ring, baseline_context["last_failure_reason"]),
+        "frontier": baseline_context.get("components", {}).get("frontier"),
     }
     seed_population_baseline(population, working_path, baseline_context)
 
@@ -660,6 +734,7 @@ def run_evaluation_loop(
             parent_selector=population.select_parent_codes,
             diagnosis_report=diagnosis_report,
             verified_experiments=verified_experiments,
+            frontier=mutation_frontier.get("frontier"),
         )
 
         # Evaluate candidates
@@ -716,8 +791,16 @@ def run_evaluation_loop(
                     if candidate_bk2_path != latest_bk2:
                         os.rename(latest_bk2, candidate_bk2_path)
 
-            marker = frontier_guard_marker(new_code) or diagnosis_guard_marker(new_code)
-            if reasoning in ("Deterministic frontier guard", "Diagnosed guard (verified input)") and marker is not None:
+            marker = (
+                frontier_guard_marker(new_code)
+                or diagnosis_guard_marker(new_code)
+                or llm_guard_marker(new_code)
+            )
+            if reasoning in (
+                "Deterministic frontier guard",
+                "Diagnosed guard (verified input)",
+                "LLM structured guard",
+            ) and marker is not None:
                 components = dict(components)
                 components["frontier_guard_marker"] = marker
                 attempted_frontier_markers.add(marker)
@@ -774,6 +857,32 @@ def run_evaluation_loop(
             except Exception as e:
                 print(f"Failed to render video: {e}")
 
+        # Retest a would-be winner before promoting it: eval variance means a
+        # single lucky run must not become the champion. Require the gain to
+        # reproduce and record the conservative (min) fitness.
+        if (
+            env is not None
+            and best_candidate_promotable
+            and best_candidate_fitness > working_fitness
+            and best_candidate_path
+            and os.path.exists(best_candidate_path)
+        ):
+            retest_fitness = retest_candidate_fitness(
+                env, mutator, best_candidate_path, max_frames, action_repeat
+            )
+            if retest_fitness is not None:
+                confirmed = promotion_confirmed(
+                    best_candidate_fitness, retest_fitness, working_fitness
+                )
+                print(
+                    f"Retest of best candidate: {best_candidate_fitness:.2f} -> "
+                    f"{retest_fitness:.2f} (bar {working_fitness:.2f}); "
+                    f"{'confirmed' if confirmed else 'NOT reproduced -- variance, not promoting'}"
+                )
+                best_candidate_fitness = min(best_candidate_fitness, retest_fitness)
+                if not confirmed:
+                    best_candidate_promotable = False
+
         promoted = best_candidate_promotable and best_candidate_fitness > working_fitness
         # Only a promoted run may replace the persisted diagnosis window: a
         # losing candidate's failure is not the frontier the next mutations
@@ -790,6 +899,7 @@ def run_evaluation_loop(
                 if promoted
                 else best_candidate_screenshot,
                 "window": candidate_window,
+                "frontier": best_candidate_components.get("frontier"),
             },
             promoted=promoted,
         )

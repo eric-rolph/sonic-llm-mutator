@@ -166,5 +166,33 @@
         "lesson": "When x_velocity is zero while moving right at the start of an act, incorporate jumps ('RIGHT,B') to overcome small obstacles that block momentum.",
         "zone": 0,
         "act": 1
+    },
+    {
+        "x": 80,
+        "hazard": "Initial Stall",
+        "lesson": "If x_velocity is 0 while pressing RIGHT for an extended period, incorporate a jump (B) to break out of potential collisions or state stalls.",
+        "zone": 0,
+        "act": 0
+    },
+    {
+        "x": 2229,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If forward progress stops (x_velocity == 0) while pressing RIGHT, try a pure jump (B) or changing input to break out of the stall.",
+        "zone": 0,
+        "act": 0
+    },
+    {
+        "x": 2400,
+        "hazard": "Wall/Obstacle",
+        "lesson": "If x_velocity becomes negative or zero while holding RIGHT around X=2400 in Zone 0 Act 1, perform a jump (RIGHT,B) to clear the obstacle instead of continuing to hold RIGHT.",
+        "zone": 0,
+        "act": 1
+    },
+    {
+        "x": 203,
+        "hazard": "Low wall/obstacle",
+        "lesson": "If forward progress stalls (low x_velocity) while moving right in Zone 0 Act 1, use 'RIGHT,B' to jump over potential low-height obstacles.",
+        "zone": 0,
+        "act": 1
     }
 ]
