@@ -109,6 +109,69 @@ class SweepTests(unittest.TestCase):
         self.assertIn("skipped", summary)
 
 
+class PositionGateablePreferenceTests(unittest.TestCase):
+    def test_gateable_classification(self):
+        from core.frontier import experiment_position_gateable
+
+        forward = {"segments": [
+            {"actions": "RIGHT", "frames": 180, "start_x": 3593},
+            {"actions": "RIGHT,B", "frames": 45, "start_x": 4053},
+        ]}
+        backward = {"segments": [
+            {"actions": "LEFT", "frames": 60, "start_x": 3593},
+            {"actions": "RIGHT", "frames": 120, "start_x": 3100},
+        ]}
+        single_hold = {"actions": "RIGHT,B", "hold_frames": 45}
+        jump_first = {"segments": [
+            {"actions": "RIGHT,B", "frames": 30, "start_x": 3593},
+            {"actions": "RIGHT", "frames": 60, "start_x": 3650},
+        ]}
+
+        self.assertTrue(experiment_position_gateable(forward))
+        self.assertTrue(experiment_position_gateable(single_hold))
+        self.assertFalse(experiment_position_gateable(backward))
+        self.assertFalse(experiment_position_gateable(jump_first))
+
+    def test_generate_candidates_prefers_gateable_over_higher_max_x(self):
+        import main
+
+        working = "def get_action(state):\n    return 'RIGHT'\n"
+        backward_far = {  # verified further, but compiles to a time replay
+            "zone": 0, "act": 1, "start_x": 3593, "max_x": 4917, "actions": "LEFT",
+            "segments": [
+                {"actions": "LEFT", "frames": 60, "start_x": 3593, "start_y": 600},
+                {"actions": "RIGHT", "frames": 180, "start_x": 3100, "start_y": 600},
+                {"actions": "RIGHT,B", "frames": 45, "start_x": 4053, "start_y": 620},
+            ],
+        }
+        forward_near = {  # verified slightly shorter, but replay-faithful
+            "zone": 0, "act": 1, "start_x": 3593, "max_x": 4800, "actions": "RIGHT",
+            "segments": [
+                {"actions": "RIGHT", "frames": 180, "start_x": 3593, "start_y": 600},
+                {"actions": "RIGHT,B", "frames": 45, "start_x": 4053, "start_y": 620},
+            ],
+        }
+
+        with redirect_stdout(StringIO()):
+            candidates = main.generate_candidates(
+                _NoLlmMutator(), working, "stuck", None, [], [], 1, [],
+                crossover_probability=0.0,
+                verified_experiments=[backward_far, forward_near],
+            )
+
+        code, reasoning = candidates[0]
+        self.assertEqual(reasoning, "Diagnosed guard (verified input)")
+        self.assertIn("_diag_x", code)  # position-gated form, not pure time replay
+
+
+class _NoLlmMutator:
+    def mutate_policy(self, *a, **k):
+        raise AssertionError("deterministic slot must fill without the LLM")
+
+    def crossover_policies(self, *a, **k):
+        raise AssertionError("no crossover expected")
+
+
 class MaybeDiagnoseIntegrationTests(unittest.TestCase):
     def test_sweep_hit_short_circuits_vision_diagnosis(self):
         import main

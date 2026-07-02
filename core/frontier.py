@@ -285,6 +285,28 @@ def diagnosis_guard_marker(code):
     return match.group(0) if match else None
 
 
+def experiment_position_gateable(experiment):
+    """True when the experiment compiles into a position-faithful guard.
+
+    Forward B-less run-ups (and plain single holds) replay by POSITION, which
+    live testing showed is faithful; backward run-ups fall back to band-anchored
+    TIME replay, whose band-entry slop repeatedly missed precision jumps
+    (verified x=4917 replayed as x=4258). Candidate selection prefers gateable
+    experiments even at slightly lower verified max_x.
+    """
+    segments = (experiment or {}).get("segments") or []
+    if len(segments) < 2:
+        return True  # single holds compile to x-threshold guards (positional)
+    first, second = segments[0], segments[1]
+    try:
+        first_actions = str(first.get("actions", ""))
+        first_x = int(first["start_x"])
+        second_x = int(second["start_x"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return "B" not in first_actions and second_x > first_x
+
+
 def build_llm_guard_candidate(working_code, proposal, x_radius=25):
     """Compile an UNVERIFIED structured model proposal into a preserving guard.
 

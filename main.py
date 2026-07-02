@@ -32,6 +32,7 @@ from core.frontier import (
     build_diagnosis_guard_candidate,
     build_frontier_guard_candidate,
     diagnosis_guard_marker,
+    experiment_position_gateable,
     frontier_guard_marker,
     llm_guard_marker,
     recently_attempted_frontier_guard,
@@ -394,10 +395,14 @@ def generate_candidates(
 
     deterministic = None
     reasoning_label = None
-    # A measured escape beats the heuristic recovery guard: try the best
-    # verified experiment (furthest measured x) first.
+    # A measured escape beats the heuristic recovery guard. Prefer experiments
+    # that compile into POSITION-faithful guards (forward run-ups / single
+    # holds) over band-anchored time replays, then the furthest measured x:
+    # live testing showed time-replay slop repeatedly missing precision jumps.
     for experiment in sorted(
-        verified_experiments or [], key=lambda e: e.get("max_x", 0), reverse=True
+        verified_experiments or [],
+        key=lambda e: (experiment_position_gateable(e), e.get("max_x", 0)),
+        reverse=True,
     ):
         guard = build_diagnosis_guard_candidate(working_code, experiment)
         if guard is not None and not recently_attempted_frontier_guard(

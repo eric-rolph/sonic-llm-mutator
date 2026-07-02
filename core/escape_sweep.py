@@ -31,7 +31,13 @@ SEQUENCES = (
     ({"actions": "RIGHT", "frames": 30}, {"actions": "RIGHT,B", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
     ({"actions": "RIGHT", "frames": 60}, {"actions": "RIGHT,B", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
     ({"actions": "RIGHT", "frames": 120}, {"actions": "RIGHT,B", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
+    # Long forward runways: from a standstill Sonic nears top speed in ~3s, and
+    # a FORWARD B-less run-up compiles into the position-gated (replay-faithful)
+    # guard, unlike back-up sequences which need band-anchored time replay.
+    ({"actions": "RIGHT", "frames": 180}, {"actions": "RIGHT,B", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
+    ({"actions": "RIGHT", "frames": 240}, {"actions": "RIGHT,B", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
     ({"actions": "RIGHT", "frames": 60}, {"actions": "RIGHT,UP,B", "frames": 50}, {"actions": "RIGHT", "frames": 100}),
+    ({"actions": "RIGHT", "frames": 180}, {"actions": "RIGHT,UP,B", "frames": 50}, {"actions": "RIGHT", "frames": 100}),
     ({"actions": "RIGHT,DOWN", "frames": 45}, {"actions": "RIGHT", "frames": 120}),
     # Back up for a longer runway, then jump at speed. Wide gaps need launch
     # SPEED: the runway length is the dominant unknown, so scan it too.
